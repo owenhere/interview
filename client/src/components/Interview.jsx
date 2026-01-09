@@ -59,6 +59,7 @@ export default function Interview({ name, email, country, phone, interviewId, st
   const sessionIdRef = useRef(null)
   const uploadPromiseRef = useRef(null)
   const uploadQueueRef = useRef(Promise.resolve())
+  const hasChunkRef = useRef(false)
 
   useEffect(() => {
     let cancelled = false
@@ -109,6 +110,9 @@ export default function Interview({ name, email, country, phone, interviewId, st
   useEffect(() => {
     const tryFinalizeViaBeacon = () => {
       try {
+        // If we haven't produced any chunks yet, finalizing will fail ("no chunks found").
+        // This can happen if the tab closes before the first MediaRecorder timeslice fires.
+        if (!hasChunkRef.current) return
         const url = `${API_BASE}/upload-complete-beacon`
         const payload = JSON.stringify({ sessionId: sessionIdRef.current, name, email, country, phone, interviewId })
         if (navigator.sendBeacon) {
@@ -166,6 +170,7 @@ export default function Interview({ name, email, country, phone, interviewId, st
     mr.ondataavailable = (e) => {
       if (e.data && e.data.size) {
         chunksRef.current.push(e.data)
+        hasChunkRef.current = true
         const thisIndex = chunkIndex++
         // Upload chunks sequentially to avoid flooding slow networks with parallel requests.
         uploadQueueRef.current = uploadQueueRef.current.then(async () => {

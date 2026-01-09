@@ -566,6 +566,11 @@ app.get(withBackendPrefix('/upload-complete-beacon'), (req, res) => {
   assembleChunks(sessionId, name, interviewId, { email, country, phone }).then(file => {
     console.log('Beacon assembled session', sessionId, '->', file.filename)
   }).catch(err => {
+    // It's normal to have no chunks (e.g. tab closed before first timeslice, or final file upload path used).
+    if ((err && err.message) === 'no chunks found') {
+      console.log('Beacon assemble skipped (no chunks) for', sessionId)
+      return
+    }
     console.warn('Beacon assemble failed for', sessionId, err.message || err)
   })
   return res.status(202).json({ ok: true, message: 'Assemble triggered' })
@@ -578,6 +583,10 @@ app.post(withBackendPrefix('/upload-complete-beacon'), express.json(), (req, res
   assembleChunks(sessionId, name, interviewId, { email, country, phone }).then(file => {
     console.log('Beacon (POST) assembled session', sessionId, '->', file.filename)
   }).catch(err => {
+    if ((err && err.message) === 'no chunks found') {
+      console.log('Beacon (POST) assemble skipped (no chunks) for', sessionId)
+      return
+    }
     console.warn('Beacon (POST) assemble failed for', sessionId, err.message || err)
   })
   return res.status(202).json({ ok: true, message: 'Assemble triggered' })
@@ -619,7 +628,12 @@ setInterval(() => {
       // if no chunk activity for 30 seconds, attempt assembly
       if (now - latest > 30_000) {
         console.log('Background assembler: assembling stale session', sid)
-        assembleChunks(sid).then(f => console.log('Background assembled', sid, f && f.filename)).catch(e => console.warn('Background assemble failed', sid, e.message || e))
+        assembleChunks(sid)
+          .then(f => console.log('Background assembled', sid, f && f.filename))
+          .catch(e => {
+            if ((e && e.message) === 'no chunks found') return
+            console.warn('Background assemble failed', sid, e.message || e)
+          })
       }
     }
   } catch (err) { /* ignore scanning errors */ }
