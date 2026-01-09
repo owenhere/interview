@@ -282,15 +282,28 @@ export default function Admin() {
 
   return (
     <div className="container"><Card className="card" style={{ width: '95%', maxWidth: 1100 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div>
-          <h2 style={{ marginBottom: 0 }}>Recordings</h2>
-          <Text className="muted">{recordings.length} items</Text>
+      <div
+        style={{
+          position: 'sticky',
+          top: 0,
+          zIndex: 50,
+          background: 'rgba(11,22,39,0.96)',
+          backdropFilter: 'blur(8px)',
+          padding: '12px 0',
+          marginTop: -6,
+          borderBottom: '1px solid rgba(148,163,184,0.18)',
+        }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <h2 style={{ marginBottom: 0 }}>Recordings</h2>
+            <Text className="muted">{recordings.length} items</Text>
+          </div>
+          <Space>
+            <Button type="primary" onClick={() => fetchRecordings(token)} loading={loading}>Refresh</Button>
+            <Button danger onClick={logout}>Logout</Button>
+          </Space>
         </div>
-        <Space>
-          <Button onClick={() => fetchRecordings(token)} loading={loading}>Refresh</Button>
-          <Button danger onClick={logout}>Logout</Button>
-        </Space>
       </div>
 
       <div style={{ marginTop: 16 }}>
