@@ -221,7 +221,8 @@ export default function Interview({ name, email, country, phone, interviewId, st
             // Try finalize (best-effort). If it fails, user can still download the local recording.
             try {
               await finalizeUpload({ sessionId: sessionIdRef.current, name, email, country, phone, interviewId })
-              message.success('Interview finalized')
+              // "finalized" still means the interview is successfully saved (via chunk assembly).
+              message.success('Interview uploaded')
             } catch (e2) {
               setUploadError('Upload failed. Please download your recording and try again.')
               console.warn('finalize failed', e2)

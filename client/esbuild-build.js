@@ -23,7 +23,8 @@ function loadDotEnv() {
       if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
         val = val.slice(1, -1)
       }
-      if (!Object.prototype.hasOwnProperty.call(process.env, key)) {
+      // Allow .env to override empty values (common when env var exists but is blank)
+      if (!Object.prototype.hasOwnProperty.call(process.env, key) || process.env[key] === '') {
         process.env[key] = val
       }
     }

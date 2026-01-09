@@ -4,7 +4,7 @@
 const API_ORIGIN =
   typeof process !== 'undefined' && process.env && typeof process.env.API_BASE !== 'undefined'
     ? process.env.API_BASE
-    : '';
+    : 'localhost:4000';
 
 const API_PREFIX =
   typeof process !== 'undefined' && process.env && process.env.API_PREFIX
@@ -12,8 +12,15 @@ const API_PREFIX =
     : '/backend';
 
 function joinUrl(base, prefix) {
-  const b = String(base || '')
+  let b = String(base || '')
   const p = String(prefix || '')
+
+  // Normalize common "host:port" values to valid absolute URLs for browsers.
+  // Example: API_BASE=localhost:4000 -> http://localhost:4000
+  if (b && !/^https?:\/\//i.test(b) && /^[^/]+:\d+$/i.test(b)) {
+    b = `http://${b}`
+  }
+
   if (!p) return b
   if (!b) return p.startsWith('/') ? p : `/${p}`
   return `${b.replace(/\/+$/, '')}/${p.replace(/^\/+/, '')}`

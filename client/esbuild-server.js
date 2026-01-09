@@ -23,7 +23,8 @@ async function start() {
         if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
           val = val.slice(1, -1)
         }
-        if (!Object.prototype.hasOwnProperty.call(process.env, key)) {
+        // Allow .env to override empty values (common when env var exists but is blank)
+        if (!Object.prototype.hasOwnProperty.call(process.env, key) || process.env[key] === '') {
           process.env[key] = val
         }
       }
@@ -71,7 +72,55 @@ async function start() {
   await ctx.watch()
   // serve static files from public on port 5173 with SPA fallback
   const http = require('http')
+  const https = require('https')
   const handler = require('serve-handler')
+
+  function normalizeOrigin(origin) {
+    const o = String(origin || '')
+    if (!o) return ''
+    if (/^https?:\/\//i.test(o)) return o
+    if (/^[^/]+:\d+$/i.test(o)) return `http://${o}`
+    return o
+  }
+
+  const backendOrigin = normalizeOrigin(API_BASE)
+  const backendPrefix = API_PREFIX || '/backend'
+
+  function proxyToBackend(req, res) {
+    if (!backendOrigin) return false
+    if (!req.url || !req.url.startsWith(backendPrefix + '/')) return false
+
+    const target = new URL(backendOrigin)
+    const isHttps = target.protocol === 'https:'
+    const lib = isHttps ? https : http
+    const outPath = req.url.slice(backendPrefix.length) || '/'
+
+    const proxyReq = lib.request(
+      {
+        protocol: target.protocol,
+        hostname: target.hostname,
+        port: target.port || (isHttps ? 443 : 80),
+        method: req.method,
+        path: outPath,
+        headers: {
+          ...req.headers,
+          host: target.host,
+        },
+      },
+      (proxyRes) => {
+        res.writeHead(proxyRes.statusCode || 502, proxyRes.headers)
+        proxyRes.pipe(res)
+      }
+    )
+
+    proxyReq.on('error', (err) => {
+      res.statusCode = 502
+      res.end(`Proxy error: ${err.message || err}`)
+    })
+
+    req.pipe(proxyReq)
+    return true
+  }
   const serve = http.createServer((req, res) => {
     if (req.url === '/esbuild') {
       res.writeHead(200, {
@@ -84,6 +133,10 @@ async function start() {
       req.on('close', () => clients.delete(res))
       return
     }
+
+    // Dev convenience: proxy /backend/* to the backend server so media URLs like
+    // /backend/uploads/... work even when frontend runs at :5173.
+    if (proxyToBackend(req, res)) return
 
     return handler(req, res, {
     // prevent aggressive caching during development so CSS/JS edits show up immediately

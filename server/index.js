@@ -3,6 +3,7 @@ const cors = require('cors');
 const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
+const { spawn } = require('child_process')
 
 // Resolve a fetch implementation:
 // 1) prefer global fetch (Node 18+),
@@ -183,6 +184,86 @@ try {
 }
 
 const jwt = require('jsonwebtoken')
+
+// Build an absolute public URL from an incoming request.
+// This avoids frontend-origin mismatches for media URLs in dev/prod/proxy setups.
+function getPublicOrigin(req) {
+  const xfProto = req.headers['x-forwarded-proto']
+  const xfHost = req.headers['x-forwarded-host']
+  const proto = String(xfProto || req.protocol || 'http').split(',')[0].trim()
+  const host = String(xfHost || req.get('host') || '').split(',')[0].trim()
+  if (!host) return ''
+  return `${proto}://${host}`
+}
+
+function toAbsoluteUrl(req, maybeRelativeUrl) {
+  const u = String(maybeRelativeUrl || '')
+  if (!u) return u
+  if (/^https?:\/\//i.test(u)) return u
+  const origin = getPublicOrigin(req)
+  if (!origin) return u
+  return u.startsWith('/') ? `${origin}${u}` : `${origin}/${u}`
+}
+
+// ---- Optional ffmpeg helpers (for reliable chunk assembly + MP4 output) -----
+
+function isFfmpegLikelyAvailable() {
+  // Allow explicitly disabling in environments where spawn is restricted.
+  if (String(process.env.ENABLE_FFMPEG || '').toLowerCase() === 'false') return false
+  // If explicitly enabled, try anyway.
+  // Otherwise, do a lightweight best-effort check when the feature is used.
+  return true
+}
+
+function runFfmpeg(args, { cwd } = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('ffmpeg', args, { cwd })
+    let stderr = ''
+    child.stderr.on('data', (d) => { stderr += d.toString() })
+    child.on('error', (err) => reject(err))
+    child.on('close', (code) => {
+      if (code === 0) return resolve({ ok: true })
+      const e = new Error(`ffmpeg exited with code ${code}`)
+      e.stderr = stderr
+      reject(e)
+    })
+  })
+}
+
+async function tryAssembleToMp4WithFfmpeg({ chunkPaths, outPathMp4 }) {
+  // Use ffmpeg concat demuxer for proper media concatenation.
+  // Works when the chunk files are valid media segments.
+  const listPath = path.join(path.dirname(outPathMp4), `ffconcat-${Date.now()}.txt`)
+  try {
+    const contents = chunkPaths
+      .map(p => `file '${String(p).replace(/'/g, "'\\''")}'`)
+      .join('\n')
+    fs.writeFileSync(listPath, contents)
+
+    // Re-encode to H.264/AAC MP4 for maximum compatibility.
+    // -map 0:a? makes audio optional (won't fail if no audio track).
+    await runFfmpeg([
+      '-y',
+      '-f', 'concat',
+      '-safe', '0',
+      '-i', listPath,
+      '-map', '0:v:0',
+      '-map', '0:a?',
+      '-c:v', 'libx264',
+      '-preset', 'veryfast',
+      '-crf', '28',
+      '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac',
+      '-b:a', '96k',
+      '-movflags', '+faststart',
+      outPathMp4,
+    ])
+
+    return { ok: true }
+  } finally {
+    try { fs.unlinkSync(listPath) } catch (e) {}
+  }
+}
 
 // Interview session templates created by admin (e.g. "C#", "React", etc.)
 const INTERVIEWS_FILE = path.join(__dirname, 'interviews.json')
@@ -459,15 +540,37 @@ async function assembleChunks(sessionId, name, interviewId, candidate) {
     const bi = b.split('-chunk-')[1].split('-')[0]
     return Number(ai) - Number(bi)
   })
-  const outName = `${Date.now()}-${sessionId}.webm`
-  const outPath = path.join(UPLOAD_DIR, outName)
-  const ws = fs.createWriteStream(outPath)
-  for (const f of files) {
-    const buf = fs.readFileSync(path.join(CHUNK_DIR, f))
-    ws.write(buf)
+
+  const chunkPaths = files.map(f => path.join(CHUNK_DIR, f))
+
+  // Prefer producing MP4 for maximum compatibility, if ffmpeg is available.
+  // If ffmpeg isn't available (or fails), fall back to byte concatenation (best effort).
+  let outName = `${Date.now()}-${sessionId}.mp4`
+  let outPath = path.join(UPLOAD_DIR, outName)
+  let assembledViaFfmpeg = false
+
+  if (isFfmpegLikelyAvailable()) {
+    try {
+      await tryAssembleToMp4WithFfmpeg({ chunkPaths, outPathMp4: outPath })
+      assembledViaFfmpeg = true
+    } catch (e) {
+      // If ffmpeg is missing or concat fails, we'll fall back to naive concat.
+      console.warn('ffmpeg chunk assembly failed; falling back to naive concat', e?.message || e)
+      assembledViaFfmpeg = false
+    }
   }
-  ws.end()
-  await new Promise((resolve, reject) => { ws.on('finish', resolve); ws.on('error', reject) })
+
+  if (!assembledViaFfmpeg) {
+    outName = `${Date.now()}-${sessionId}.webm`
+    outPath = path.join(UPLOAD_DIR, outName)
+    const ws = fs.createWriteStream(outPath)
+    for (const p of chunkPaths) {
+      const buf = fs.readFileSync(p)
+      ws.write(buf)
+    }
+    ws.end()
+    await new Promise((resolve, reject) => { ws.on('finish', resolve); ws.on('error', reject) })
+  }
 
   // create session entry and attach file
   const records = JSON.parse(fs.readFileSync(RECORDS_FILE, 'utf8') || '[]')
@@ -766,7 +869,9 @@ app.get(withBackendPrefix('/admin/recordings'), (req, res) => {
     return res.status(401).json({ error: 'Invalid token' })
   }
   const records = JSON.parse(fs.readFileSync(RECORDS_FILE, 'utf8') || '[]')
-  const port = process.env.PORT || 4000
+  // For local files, return a URL that works behind nginx `/backend/` proxy.
+  // We serve uploads at both `/uploads` and `/backend/uploads` on the node server.
+  const uploadsPrefix = '/backend'
   const list = records.map(s => ({
     id: s.id,
     sessionId: s.sessionId || s.id,
@@ -774,7 +879,18 @@ app.get(withBackendPrefix('/admin/recordings'), (req, res) => {
     metadata: s.metadata || {},
     createdAt: s.createdAt || s.uploadedAt,
     lastUploadedAt: s.lastUploadedAt,
-    files: (s.files || []).map(f => ({ id: f.id, filename: f.filename, question: f.question, index: f.index, uploadedAt: f.uploadedAt, url: f.remoteUrl || `http://localhost:${port}${f.path}`, transcript: f.transcript, analysis: f.analysis })),
+    files: (s.files || []).map(f => ({
+      id: f.id,
+      filename: f.filename,
+      question: f.question,
+      index: f.index,
+      uploadedAt: f.uploadedAt,
+      // Always return an absolute URL so the admin <video> element loads from the backend
+      // even when the frontend is served from a different origin (e.g. preview server).
+      url: f.remoteUrl || toAbsoluteUrl(req, `${uploadsPrefix}${f.path}`),
+      transcript: f.transcript,
+      analysis: f.analysis,
+    })),
     conversation: s.conversation || []
   }))
   return res.json({ recordings: list })

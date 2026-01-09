@@ -30,3 +30,7 @@ Endpoints
 
 Notes
 - This is a minimal starter. Improve UI, security, error handling, and storage as needed.
+- Video format:
+  - Many browsers (notably Chrome) record via `MediaRecorder` as **WebM**, not MP4.
+  - To ensure finalized recordings are **MP4**, the backend will use **ffmpeg** (if available) to assemble/transcode chunk uploads into `.mp4`.
+  - Install ffmpeg on your deployed server, or set `ENABLE_FFMPEG=false` to disable this behavior.
