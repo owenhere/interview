@@ -43,7 +43,14 @@ const storage = multer.diskStorage({
     cb(null, `${ts}-${safe}`);
   }
 });
-const upload = multer({ storage });
+const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB || 100)
+const upload = multer({
+  storage,
+  limits: {
+    // Applies per multipart file. Note: many deployments will enforce a lower limit at the reverse proxy.
+    fileSize: Math.max(1, MAX_UPLOAD_MB) * 1024 * 1024,
+  },
+});
 
 const OPENAI_KEY = process.env.OPENAI_API_KEY;
 if (!OPENAI_KEY) {
@@ -927,6 +934,21 @@ app.delete(['/admin/recordings/:id', '/backend/admin/recordings/:id'], (req, res
 
 // Serve uploads statically
 app.use(['/uploads', '/backend/uploads'], express.static(UPLOAD_DIR))
+
+// Map common upload-size errors to 413 with a clear message.
+// Note: if you're behind a reverse proxy (nginx/traefik/cloudflare), the proxy may reject requests
+// before they reach Node. In that case, you must increase the proxy's max body size too.
+app.use((err, req, res, next) => {
+  try {
+    if (err && (err.code === 'LIMIT_FILE_SIZE' || err.status === 413)) {
+      return res.status(413).json({
+        error: 'Request Entity Too Large',
+        message: `Upload rejected (too large). Increase proxy max body size and/or set MAX_UPLOAD_MB (current: ${MAX_UPLOAD_MB}).`,
+      })
+    }
+  } catch (e) {}
+  return next(err)
+})
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {

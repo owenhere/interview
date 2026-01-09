@@ -34,3 +34,11 @@ Notes
   - Many browsers (notably Chrome) record via `MediaRecorder` as **WebM**, not MP4.
   - To ensure finalized recordings are **MP4**, the backend will use **ffmpeg** (if available) to assemble/transcode chunk uploads into `.mp4`.
   - Install ffmpeg on your deployed server, or set `ENABLE_FFMPEG=false` to disable this behavior.
+- Upload limits / 413 errors:
+  - If you see `413 Request Entity Too Large` on `POST /backend/upload-chunk`, it's **not** a slow-internet error — it means your **reverse proxy** (nginx/traefik) or Node upload limits are too small.
+  - Node/multer limit can be controlled via `MAX_UPLOAD_MB` (defaults to 100MB).
+  - If you use nginx, set e.g.:
+
+```nginx
+client_max_body_size 50m;
+```

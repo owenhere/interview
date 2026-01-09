@@ -159,8 +159,9 @@ export default function Interview({ name, email, country, phone, interviewId, st
       mimeType: preferred,
       // Lower bitrate => smaller files => more reliable on slow networks.
       // Works best with H.264/MP4 when available.
-      videoBitsPerSecond: 1_500_000,
-      audioBitsPerSecond: 96_000,
+      // Keep chunks small enough for common reverse-proxy limits (often ~1MB).
+      videoBitsPerSecond: 800_000,
+      audioBitsPerSecond: 64_000,
     }
     const mr = new MediaRecorder(mediaRef.current.srcObject || mediaStream, options)
     recorderRef.current = mr
@@ -188,6 +189,10 @@ export default function Interview({ name, email, country, phone, interviewId, st
               if (!resp.ok) throw new Error(`upload-chunk failed (${resp.status})`)
               return
             } catch (err) {
+              // 413 usually means the server/proxy rejected the request size.
+              if (String(err?.message || '').includes('(413)')) {
+                setUploadError('Upload failed (413: file too large). Please contact the admin to increase server upload limit or try again on a stronger connection.')
+              }
               if (attempt === 1) console.warn('chunk upload failed', err)
               await new Promise(r => setTimeout(r, 500 * (attempt + 1)))
             }
@@ -234,8 +239,8 @@ export default function Interview({ name, email, country, phone, interviewId, st
       })()
     }
     mr.onerror = (ev) => console.error('Recorder error', ev)
-    // Larger timeslice => fewer network requests on slow networks.
-    mr.start(5000)
+    // Smaller timeslice => smaller chunks (helps avoid 413 from proxies with small body limits).
+    mr.start(2000)
     setRecording(true)
   }
 
