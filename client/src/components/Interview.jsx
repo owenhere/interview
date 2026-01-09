@@ -1,5 +1,5 @@
 ﻿import React, { useEffect, useRef, useState } from 'react'
-import { Card, Button, message } from 'antd'
+import { Card, Button, message, Modal, Spin } from 'antd'
 import '../styles/interview.css'
 import { AudioOutlined, StopOutlined } from '@ant-design/icons'
 import { API_BASE, generateQuestions, finalizeUpload } from '../api'
@@ -53,6 +53,7 @@ export default function Interview({ name, email, country, phone, interviewId, st
   const [lastRecording, setLastRecording] = useState(null) // { blob, filename }
   const [uploading, setUploading] = useState(false)
   const [uploadError, setUploadError] = useState('')
+  const [thankYouOpen, setThankYouOpen] = useState(false)
   const mediaRef = useRef(null)
   const recorderRef = useRef(null)
   const chunksRef = useRef([])
@@ -205,6 +206,7 @@ export default function Interview({ name, email, country, phone, interviewId, st
         try {
           setUploading(true)
           setUploadError('')
+          let uploadSucceeded = false
           // Prefer uploading one final file for reliable playback.
           // Chunk assembly by byte concatenation can produce a corrupted WebM container in some browsers.
           try {
@@ -220,18 +222,25 @@ export default function Interview({ name, email, country, phone, interviewId, st
             try { await resp.json() } catch (e) {}
             if (!resp.ok) throw new Error(`upload-answer failed (${resp.status})`)
             setLastRecording({ blob, filename })
+            uploadSucceeded = true
             message.success('Interview uploaded')
           } catch (e) {
             console.warn('upload-answer failed; falling back to chunk finalize', e)
             // Try finalize (best-effort). If it fails, user can still download the local recording.
             try {
-              await finalizeUpload({ sessionId: sessionIdRef.current, name, email, country, phone, interviewId })
+              const r = await finalizeUpload({ sessionId: sessionIdRef.current, name, email, country, phone, interviewId })
+              if (r && r.ok) uploadSucceeded = true
               // "finalized" still means the interview is successfully saved (via chunk assembly).
               message.success('Interview uploaded')
             } catch (e2) {
               setUploadError('Upload failed. Please download your recording and try again.')
               console.warn('finalize failed', e2)
             }
+          }
+
+          if (uploadSucceeded) {
+            // Show a friendly confirmation modal after successful upload.
+            setThankYouOpen(true)
           }
         } catch (e) { console.warn('finalize failed', e) }
         chunksRef.current = []
@@ -257,6 +266,27 @@ export default function Interview({ name, email, country, phone, interviewId, st
   return (
     <div className="interview-page" role="main">
       <div className="interview-shell">
+        <Modal
+          open={thankYouOpen}
+          onOk={() => setThankYouOpen(false)}
+          onCancel={() => setThankYouOpen(false)}
+          okText="Done"
+          cancelButtonProps={{ style: { display: 'none' } }}
+          title="Thank you for completing your interview"
+        >
+          <div>
+            <p style={{ marginTop: 0 }}>
+              Your recording has been uploaded successfully.
+            </p>
+            <p>
+              Our team will review your interview and contact you using the email you provided.
+            </p>
+            <p style={{ marginBottom: 0 }}>
+              You may now close this tab.
+            </p>
+          </div>
+        </Modal>
+
         <header className="session-header">
           <div>
             <div className="session-title">Interview Session</div>
@@ -361,7 +391,10 @@ export default function Interview({ name, email, country, phone, interviewId, st
                 />
               </div>
               {!recording && uploading && (
-                <div className="muted" style={{ marginTop: 10 }}>Uploading…</div>
+                <div className="muted" style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <Spin size="small" />
+                  <span>Uploading…</span>
+                </div>
               )}
               {!recording && uploadError && (
                 <div className="muted" style={{ marginTop: 10, color: '#ef4444' }}>{uploadError}</div>
