@@ -6,7 +6,7 @@ import { API_BASE, generateQuestions, finalizeUpload } from '../api'
 
 // Total interview session timer shown in the header.
 // Increase if you want longer interviews.
-const MAX_DURATION_SECONDS = 15 * 60
+const MAX_DURATION_SECONDS = 3 * 60
 
 function formatTime(totalSeconds) {
   const minutes = String(Math.floor(totalSeconds / 60)).padStart(2, '0')
@@ -72,6 +72,9 @@ export default function Interview({ name, email, country, phone, interviewId, st
   const lastVoiceTickRef = useRef(0)
   const speakingRef = useRef(false)
   const autoStopTriggeredRef = useRef(false)
+  const recordingRef = useRef(false)
+  const uploadingRef = useRef(false)
+  const completedRef = useRef(false)
 
   useEffect(() => {
     let cancelled = false
@@ -117,6 +120,10 @@ export default function Interview({ name, email, country, phone, interviewId, st
     return () => clearInterval(interval)
   }, [recording])
 
+  useEffect(() => { recordingRef.current = !!recording }, [recording])
+  useEffect(() => { uploadingRef.current = !!uploading }, [uploading])
+  useEffect(() => { completedRef.current = !!thankYouOpen }, [thankYouOpen])
+
   useEffect(() => {
     if (!recording) return
     if (elapsedSeconds < MAX_DURATION_SECONDS) return
@@ -137,6 +144,12 @@ export default function Interview({ name, email, country, phone, interviewId, st
         // If we haven't produced any chunks yet, finalizing will fail ("no chunks found").
         // This can happen if the tab closes before the first MediaRecorder timeslice fires.
         if (!hasChunkRef.current) return
+        // Do not attempt to finalize while actively recording or uploading.
+        // (On some devices, visibility changes can happen mid-recording and would otherwise create partial files.)
+        if (recordingRef.current) return
+        if (uploadingRef.current) return
+        if (completedRef.current) return
+        if (recorderRef.current && recorderRef.current.state !== 'inactive') return
         const url = `${API_BASE}/upload-complete-beacon`
         const payload = JSON.stringify({ sessionId: sessionIdRef.current, name, email, country, phone, interviewId })
         if (navigator.sendBeacon) {

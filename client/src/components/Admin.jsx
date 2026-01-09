@@ -11,7 +11,7 @@ import {
   deleteAdminInterview,
 } from '../api'
 
-const { Text } = Typography
+const { Text, Paragraph } = Typography
 
 const ADMIN_TOKEN_KEY = 'admin_token'
 
@@ -470,8 +470,23 @@ export default function Admin() {
                       Download
                     </Button>
                   </div>
-                  <div className="muted" style={{ marginTop: 8, fontSize: 12 }}>
-                    Transcript: {f.transcript ? f.transcript.substring(0, 220) : (status.openAiConfigured ? 'Pending…' : 'OpenAI not configured')}
+                  <div style={{ marginTop: 8 }}>
+                    <div className="muted" style={{ fontSize: 12, marginBottom: 4 }}>
+                      Transcript:
+                    </div>
+                    {f.transcript ? (
+                      <Paragraph
+                        style={{ margin: 0, fontSize: 12, color: 'rgba(148,163,184,0.95)' }}
+                        ellipsis={{ rows: 4, expandable: true, symbol: 'More' }}
+                        copyable={{ text: f.transcript }}
+                      >
+                        {f.transcript}
+                      </Paragraph>
+                    ) : (
+                      <div className="muted" style={{ fontSize: 12 }}>
+                        {status.openAiConfigured ? 'Pending…' : 'OpenAI not configured'}
+                      </div>
+                    )}
                   </div>
                 </div>
               ))

@@ -290,6 +290,18 @@ function writeJsonArray(filePath, arr) {
   fs.writeFileSync(filePath, JSON.stringify(arr || [], null, 2))
 }
 
+function readRecords() {
+  try {
+    return JSON.parse(fs.readFileSync(RECORDS_FILE, 'utf8') || '[]')
+  } catch (e) {
+    return []
+  }
+}
+
+function findSession(records, sessionId) {
+  return (records || []).find(r => r && (r.id === sessionId || r.sessionId === sessionId)) || null
+}
+
 function requireAdmin(req, res) {
   const auth = req.headers.authorization || ''
   const m = auth.match(/^Bearer (.+)$/)
@@ -705,6 +717,17 @@ async function assembleChunks(sessionId, name, interviewId, candidate) {
 app.post(withBackendPrefix('/upload-complete'), express.json(), async (req, res) => {
   const { sessionId, name, interviewId, email, country, phone } = req.body || {}
   if (!sessionId) return res.status(400).json({ error: 'sessionId required' })
+
+  // Guard: don't assemble while the candidate is still recording.
+  // Some browsers fire visibility/unload events mid-recording; without this, we'd create partial files.
+  try {
+    const records = readRecords()
+    const session = findSession(records, sessionId)
+    if (session?.metadata?.recordingActive === true) {
+      return res.status(409).json({ error: 'Recording still in progress. Please try again after recording stops.' })
+    }
+  } catch (e) {}
+
   try {
     const fileEntry = await assembleChunks(sessionId, name, interviewId, { email, country, phone })
     return res.json({ ok: true, sessionId, file: fileEntry })
@@ -723,6 +746,16 @@ app.get(withBackendPrefix('/upload-complete-beacon'), (req, res) => {
   const country = req.query.country
   const phone = req.query.phone
   if (!sessionId) return res.status(400).json({ error: 'sessionId required' })
+
+  // Guard: don't assemble while recording is active. Just accept the beacon and no-op.
+  try {
+    const records = readRecords()
+    const session = findSession(records, sessionId)
+    if (session?.metadata?.recordingActive === true) {
+      return res.status(202).json({ ok: true, message: 'Recording active; assemble skipped' })
+    }
+  } catch (e) {}
+
   // run in background, don't block the request
   assembleChunks(sessionId, name, interviewId, { email, country, phone }).then(file => {
     console.log('Beacon assembled session', sessionId, '->', file.filename)
@@ -741,6 +774,16 @@ app.get(withBackendPrefix('/upload-complete-beacon'), (req, res) => {
 app.post(withBackendPrefix('/upload-complete-beacon'), express.json(), (req, res) => {
   const { sessionId, name, interviewId, email, country, phone } = req.body || {}
   if (!sessionId) return res.status(400).json({ error: 'sessionId required' })
+
+  // Guard: don't assemble while recording is active. Just accept the beacon and no-op.
+  try {
+    const records = readRecords()
+    const session = findSession(records, sessionId)
+    if (session?.metadata?.recordingActive === true) {
+      return res.status(202).json({ ok: true, message: 'Recording active; assemble skipped' })
+    }
+  } catch (e) {}
+
   assembleChunks(sessionId, name, interviewId, { email, country, phone }).then(file => {
     console.log('Beacon (POST) assembled session', sessionId, '->', file.filename)
   }).catch(err => {
