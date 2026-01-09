@@ -345,7 +345,7 @@ export default function Interview({ name, email, country, phone, interviewId, st
               const r = await finalizeUpload({ sessionId: sessionIdRef.current, name, email, country, phone, interviewId, source: refSource })
               if (r && r.ok) uploadSucceeded = true
             } catch (e2) {
-              setUploadError('Upload failed. Please download your recording and try again.')
+              setUploadError('Upload failed. Please try again.')
               console.warn('finalize failed', e2)
             }
           }
