@@ -1,12 +1,12 @@
 ﻿import React, { useEffect, useRef, useState } from 'react'
-import { Card, Button, message, Modal, Spin } from 'antd'
+import { Card, Button, Modal, Spin } from 'antd'
 import '../styles/interview.css'
 import { AudioOutlined, StopOutlined, SoundOutlined, AudioMutedOutlined } from '@ant-design/icons'
 import { API_BASE, generateQuestions, finalizeUpload } from '../api'
 
 // Total interview session timer shown in the header.
 // Increase if you want longer interviews.
-const MAX_DURATION_SECONDS = 3 * 60
+const MAX_DURATION_SECONDS = 15 * 60
 
 function formatTime(totalSeconds) {
   const minutes = String(Math.floor(totalSeconds / 60)).padStart(2, '0')
@@ -338,15 +338,12 @@ export default function Interview({ name, email, country, phone, interviewId, st
             if (!resp.ok) throw new Error(`upload-answer failed (${resp.status})`)
             setLastRecording({ blob, filename })
             uploadSucceeded = true
-            message.success('Interview uploaded')
           } catch (e) {
             console.warn('upload-answer failed; falling back to chunk finalize', e)
             // Try finalize (best-effort). If it fails, user can still download the local recording.
             try {
               const r = await finalizeUpload({ sessionId: sessionIdRef.current, name, email, country, phone, interviewId })
               if (r && r.ok) uploadSucceeded = true
-              // "finalized" still means the interview is successfully saved (via chunk assembly).
-              message.success('Interview uploaded')
             } catch (e2) {
               setUploadError('Upload failed. Please download your recording and try again.')
               console.warn('finalize failed', e2)
@@ -382,6 +379,23 @@ export default function Interview({ name, email, country, phone, interviewId, st
   return (
     <div className="interview-page" role="main">
       <div className="interview-shell">
+        <Modal
+          open={uploading}
+          centered
+          closable={false}
+          footer={null}
+          maskClosable={false}
+          width={420}
+        >
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14, padding: '18px 6px' }}>
+            <Spin size="large" />
+            <div style={{ fontWeight: 700, fontSize: 16 }}>Uploading your interview…</div>
+            <div style={{ fontSize: 13, color: 'rgba(107,114,128,0.95)', textAlign: 'center' }}>
+              Please keep this tab open. This may take a moment on slow networks.
+            </div>
+          </div>
+        </Modal>
+
         <Modal
           open={thankYouOpen}
           onOk={() => setThankYouOpen(false)}
@@ -529,12 +543,6 @@ export default function Interview({ name, email, country, phone, interviewId, st
                   style={{ width: `${Math.round(((index + 1) / questions.length) * 100)}%` }}
                 />
               </div>
-              {!recording && uploading && (
-                <div className="muted" style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <Spin size="small" />
-                  <span>Uploading…</span>
-                </div>
-              )}
               {!recording && uploadError && (
                 <div className="muted" style={{ marginTop: 10, color: '#ef4444' }}>{uploadError}</div>
               )}
