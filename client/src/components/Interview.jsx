@@ -45,7 +45,7 @@ function downloadBlob(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 10_000)
 }
 
-export default function Interview({ name, email, country, phone, interviewId, stack }) {
+export default function Interview({ name, email, country, phone, interviewId, stack, refSource }) {
   const [questions, setQuestions] = useState([])
   const [index, setIndex] = useState(0)
   const [loading, setLoading] = useState(false)
@@ -151,7 +151,7 @@ export default function Interview({ name, email, country, phone, interviewId, st
         if (completedRef.current) return
         if (recorderRef.current && recorderRef.current.state !== 'inactive') return
         const url = `${API_BASE}/upload-complete-beacon`
-        const payload = JSON.stringify({ sessionId: sessionIdRef.current, name, email, country, phone, interviewId })
+        const payload = JSON.stringify({ sessionId: sessionIdRef.current, name, email, country, phone, interviewId, source: refSource })
         if (navigator.sendBeacon) {
           const blob = new Blob([payload], { type: 'application/json' })
           navigator.sendBeacon(url, blob)
@@ -296,7 +296,7 @@ export default function Interview({ name, email, country, phone, interviewId, st
           const filename = `${sessionIdRef.current || 'session'}-chunk-${Date.now()}.${ext}`
           fd.append('video', e.data, filename)
           // include candidate details so the server can persist metadata early
-          fd.append('metadata', JSON.stringify({ sessionId: sessionIdRef.current, index: thisIndex, interviewId, name, email, country, phone }))
+          fd.append('metadata', JSON.stringify({ sessionId: sessionIdRef.current, index: thisIndex, interviewId, name, email, country, phone, source: refSource }))
           // simple retry (2 attempts) for flaky networks
           for (let attempt = 0; attempt < 2; attempt++) {
             try {
@@ -331,7 +331,7 @@ export default function Interview({ name, email, country, phone, interviewId, st
             const ext = mimeType.includes('mp4') ? 'mp4' : 'webm'
             const filename = `${sessionIdRef.current || 'session'}-${Date.now()}.${ext}`
             fd.append('video', blob, filename)
-            fd.append('metadata', JSON.stringify({ sessionId: sessionIdRef.current, name, email, country, phone, interviewId }))
+            fd.append('metadata', JSON.stringify({ sessionId: sessionIdRef.current, name, email, country, phone, interviewId, source: refSource }))
             const resp = await fetch(`${API_BASE}/upload-answer`, { method: 'POST', body: fd })
             // server returns JSON; ignore parsing failures (e.g. if server errors)
             try { await resp.json() } catch (e) {}
@@ -342,7 +342,7 @@ export default function Interview({ name, email, country, phone, interviewId, st
             console.warn('upload-answer failed; falling back to chunk finalize', e)
             // Try finalize (best-effort). If it fails, user can still download the local recording.
             try {
-              const r = await finalizeUpload({ sessionId: sessionIdRef.current, name, email, country, phone, interviewId })
+              const r = await finalizeUpload({ sessionId: sessionIdRef.current, name, email, country, phone, interviewId, source: refSource })
               if (r && r.ok) uploadSucceeded = true
             } catch (e2) {
               setUploadError('Upload failed. Please download your recording and try again.')

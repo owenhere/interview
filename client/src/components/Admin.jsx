@@ -454,6 +454,7 @@ export default function Admin() {
             <div className="muted" style={{ marginBottom: 4 }}>Email: <strong>{selected.metadata?.email || '—'}</strong></div>
             <div className="muted" style={{ marginBottom: 4 }}>Country: <strong>{selected.metadata?.country || '—'}</strong></div>
             <div className="muted" style={{ marginBottom: 4 }}>Phone: <strong>{selected.metadata?.phone || '—'}</strong></div>
+            <div className="muted" style={{ marginBottom: 4 }}>Source: <strong>{selected.metadata?.source || '—'}</strong></div>
 
             <Divider style={{ borderColor: 'rgba(148,163,184,0.25)' }} />
 

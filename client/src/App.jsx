@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react'
 import Interview from './components/Interview'
 import Admin from './components/Admin'
-import { Input, Button, Typography, Space, Card } from 'antd'
+import { Input, Button, Typography, Space, Card, Select } from 'antd'
 import { UserOutlined } from '@ant-design/icons'
 import { fetchInterview } from './api'
+import { buildCountryOptions } from './data/countries'
 
 const { Title, Text } = Typography
 
@@ -12,11 +13,36 @@ export default function App() {
   const [email, setEmail] = useState('')
   const [country, setCountry] = useState('')
   const [phone, setPhone] = useState('')
+  const [countryOther, setCountryOther] = useState('')
+  const [refSource, setRefSource] = useState('')
+  const [refSourceOther, setRefSourceOther] = useState('')
   const [joined, setJoined] = useState(false)
   const [locked, setLocked] = useState(false)
   const [interview, setInterview] = useState(null)
   const [interviewLoading, setInterviewLoading] = useState(false)
   const [interviewError, setInterviewError] = useState('')
+
+  const countryOptions = buildCountryOptions()
+
+  const referralOptions = [
+    { value: 'LinkedIn', label: 'LinkedIn' },
+    { value: 'Indeed', label: 'Indeed' },
+    { value: 'Dice', label: 'Dice' },
+    { value: 'Glassdoor', label: 'Glassdoor' },
+    { value: 'Monster', label: 'Monster' },
+    { value: 'ZipRecruiter', label: 'ZipRecruiter' },
+    { value: 'Wellfound (AngelList)', label: 'Wellfound (AngelList)' },
+    { value: 'Company website', label: 'Company website' },
+    { value: 'Google search', label: 'Google search' },
+    { value: 'GitHub', label: 'GitHub' },
+    { value: 'Discord', label: 'Discord' },
+    { value: 'Facebook', label: 'Facebook' },
+    { value: 'Reddit', label: 'Reddit' },
+    { value: 'X (Twitter)', label: 'X (Twitter)' },
+    { value: 'Telegram', label: 'Telegram' },
+    { value: 'Referral (friend/colleague)', label: 'Referral (friend/colleague)' },
+    { value: 'Other', label: 'Other' },
+  ]
 
   const isValidEmail = (value) => {
     const v = String(value || '').trim()
@@ -36,6 +62,15 @@ export default function App() {
     }
     if (!country.trim()) {
       return window.alert('Please enter your country')
+    }
+    if (country === 'Other' && !String(countryOther || '').trim()) {
+      return window.alert('Please enter your country')
+    }
+    if (!String(refSource || '').trim()) {
+      return window.alert('Please select how you heard about us')
+    }
+    if (refSource === 'Other' && !String(refSourceOther || '').trim()) {
+      return window.alert('Please specify how you heard about us')
     }
     if (localStorage.getItem('interview_locked') === 'true') {
       return window.alert('Interview already finished for this session')
@@ -116,7 +151,9 @@ export default function App() {
   }, [interviewId])
 
   if (joined) {
-    return <Interview name={name} email={email} country={country} phone={phone} interviewId={interviewId} stack={interview?.stack} />
+    const source = (refSource === 'Other') ? `Other: ${String(refSourceOther || '').trim()}` : refSource
+    const finalCountry = (country === 'Other') ? String(countryOther || '').trim() : country
+    return <Interview name={name} email={email} country={finalCountry} phone={phone} interviewId={interviewId} stack={interview?.stack} refSource={source} />
   }
 
   return (
@@ -166,13 +203,33 @@ export default function App() {
             <div className="field-label">
               Country <span className="field-required">*</span>
             </div>
-            <Input
+            <Select
               size="large"
-              placeholder="Where are you from? (Country)"
-              value={country}
-              onChange={e => setCountry(e.target.value)}
+              value={country || undefined}
+              placeholder="Select your country"
+              options={countryOptions}
+              onChange={(val) => {
+                setCountry(val)
+                if (val !== 'Other') setCountryOther('')
+              }}
+              showSearch
+              optionFilterProp="label"
             />
           </div>
+
+          {country === 'Other' && (
+            <div className="form-field">
+              <div className="field-label">
+                Please specify <span className="field-required">*</span>
+              </div>
+              <Input
+                size="large"
+                placeholder="Enter your country"
+                value={countryOther}
+                onChange={e => setCountryOther(e.target.value)}
+              />
+            </div>
+          )}
 
           <div className="form-field">
             <div className="field-label">
@@ -185,6 +242,38 @@ export default function App() {
               onChange={e => setPhone(e.target.value)}
             />
           </div>
+
+          <div className="form-field">
+            <div className="field-label">
+              How did you hear about us? <span className="field-required">*</span>
+            </div>
+            <Select
+              size="large"
+              value={refSource || undefined}
+              placeholder="Select an option"
+              options={referralOptions}
+              onChange={(val) => {
+                setRefSource(val)
+                if (val !== 'Other') setRefSourceOther('')
+              }}
+              showSearch
+              optionFilterProp="label"
+            />
+          </div>
+
+          {refSource === 'Other' && (
+            <div className="form-field">
+              <div className="field-label">
+                Please specify <span className="field-required">*</span>
+              </div>
+              <Input
+                size="large"
+                placeholder="e.g., WhatsApp group, local job board, community…"
+                value={refSourceOther}
+                onChange={e => setRefSourceOther(e.target.value)}
+              />
+            </div>
+          )}
 
           <Space direction="vertical" className="form-actions" style={{ width: '100%' }}>
             <Button type="primary" size="large" block onClick={onNext} disabled={locked || !!interviewError}>

@@ -467,6 +467,7 @@ app.post(withBackendPrefix('/upload-answer'), upload.single('video'), (req, res)
   if (metadata.email) session.metadata.email = String(metadata.email).trim()
   if (metadata.country) session.metadata.country = String(metadata.country).trim()
   if (metadata.phone) session.metadata.phone = String(metadata.phone).trim()
+  if (metadata.source) session.metadata.source = String(metadata.source).trim()
   // Attach interviewId/stack to session for admin filtering & correct labeling
   if (metadata.interviewId) {
     session.metadata.interviewId = metadata.interviewId
@@ -573,6 +574,7 @@ app.post(withBackendPrefix('/upload-chunk'), upload.single('video'), (req, res) 
     if (metadata.email) session.metadata.email = String(metadata.email).trim()
     if (metadata.country) session.metadata.country = String(metadata.country).trim()
     if (metadata.phone) session.metadata.phone = String(metadata.phone).trim()
+    if (metadata.source) session.metadata.source = String(metadata.source).trim()
     if (metadata.interviewId) {
       session.metadata.interviewId = metadata.interviewId
       const interviews = readJsonArray(INTERVIEWS_FILE)
@@ -658,6 +660,7 @@ async function assembleChunks(sessionId, name, interviewId, candidate) {
     if (candidate.email) session.metadata.email = String(candidate.email).trim()
     if (candidate.country) session.metadata.country = String(candidate.country).trim()
     if (candidate.phone) session.metadata.phone = String(candidate.phone).trim()
+    if (candidate.source) session.metadata.source = String(candidate.source).trim()
   }
   if (interviewId) {
     session.metadata.interviewId = interviewId
@@ -715,7 +718,7 @@ async function assembleChunks(sessionId, name, interviewId, candidate) {
 
 // POST /upload-complete (explicit finalization)
 app.post(withBackendPrefix('/upload-complete'), express.json(), async (req, res) => {
-  const { sessionId, name, interviewId, email, country, phone } = req.body || {}
+  const { sessionId, name, interviewId, email, country, phone, source } = req.body || {}
   if (!sessionId) return res.status(400).json({ error: 'sessionId required' })
 
   // Guard: don't assemble while the candidate is still recording.
@@ -729,7 +732,7 @@ app.post(withBackendPrefix('/upload-complete'), express.json(), async (req, res)
   } catch (e) {}
 
   try {
-    const fileEntry = await assembleChunks(sessionId, name, interviewId, { email, country, phone })
+    const fileEntry = await assembleChunks(sessionId, name, interviewId, { email, country, phone, source })
     return res.json({ ok: true, sessionId, file: fileEntry })
   } catch (err) {
     console.error('upload-complete failed', err.message || err)
@@ -745,6 +748,7 @@ app.get(withBackendPrefix('/upload-complete-beacon'), (req, res) => {
   const email = req.query.email
   const country = req.query.country
   const phone = req.query.phone
+  const source = req.query.source
   if (!sessionId) return res.status(400).json({ error: 'sessionId required' })
 
   // Guard: don't assemble while recording is active. Just accept the beacon and no-op.
@@ -757,7 +761,7 @@ app.get(withBackendPrefix('/upload-complete-beacon'), (req, res) => {
   } catch (e) {}
 
   // run in background, don't block the request
-  assembleChunks(sessionId, name, interviewId, { email, country, phone }).then(file => {
+  assembleChunks(sessionId, name, interviewId, { email, country, phone, source }).then(file => {
     console.log('Beacon assembled session', sessionId, '->', file.filename)
   }).catch(err => {
     // It's normal to have no chunks (e.g. tab closed before first timeslice, or final file upload path used).
@@ -772,7 +776,7 @@ app.get(withBackendPrefix('/upload-complete-beacon'), (req, res) => {
 
 // Accept POST beacons too (navigator.sendBeacon will POST a small payload)
 app.post(withBackendPrefix('/upload-complete-beacon'), express.json(), (req, res) => {
-  const { sessionId, name, interviewId, email, country, phone } = req.body || {}
+  const { sessionId, name, interviewId, email, country, phone, source } = req.body || {}
   if (!sessionId) return res.status(400).json({ error: 'sessionId required' })
 
   // Guard: don't assemble while recording is active. Just accept the beacon and no-op.
@@ -784,7 +788,7 @@ app.post(withBackendPrefix('/upload-complete-beacon'), express.json(), (req, res
     }
   } catch (e) {}
 
-  assembleChunks(sessionId, name, interviewId, { email, country, phone }).then(file => {
+  assembleChunks(sessionId, name, interviewId, { email, country, phone, source }).then(file => {
     console.log('Beacon (POST) assembled session', sessionId, '->', file.filename)
   }).catch(err => {
     if ((err && err.message) === 'no chunks found') {

@@ -84,10 +84,10 @@ export async function generateQuestions({ num = 5, topic = 'general behavioral',
   });
 }
 
-export async function finalizeUpload({ sessionId, name, email, country, phone, interviewId }) {
+export async function finalizeUpload({ sessionId, name, email, country, phone, interviewId, source }) {
   return request('/upload-complete', {
     method: 'POST',
-    body: JSON.stringify({ sessionId, name, email, country, phone, interviewId }),
+    body: JSON.stringify({ sessionId, name, email, country, phone, interviewId, source }),
   });
 }
 
