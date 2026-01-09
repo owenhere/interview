@@ -1,6 +1,13 @@
 const esbuild = require('esbuild')
 
 async function start() {
+  function envOrDefault(key, fallback) {
+    // Important: allow empty string values (e.g. API_BASE="") when needed.
+    return Object.prototype.hasOwnProperty.call(process.env, key) ? process.env[key] : fallback
+  }
+  const API_BASE = envOrDefault('API_BASE', 'http://localhost:4000')
+  const API_PREFIX = envOrDefault('API_PREFIX', '/backend')
+
   const clients = new Set()
   const liveReloadPlugin = {
     name: 'live-reload',
@@ -23,9 +30,8 @@ async function start() {
     define: {
       'process.env.NODE_ENV': '"development"',
       // Allow configuring the backend URL via environment at build time.
-      'process.env.API_BASE': JSON.stringify(process.env.API_BASE || 'http://localhost:4000'),
-      // Default to /backend so production can reverse-proxy easily.
-      'process.env.API_PREFIX': JSON.stringify(process.env.API_PREFIX || '/backend'),
+      'process.env.API_BASE': JSON.stringify(API_BASE),
+      'process.env.API_PREFIX': JSON.stringify(API_PREFIX),
     },
     plugins: [liveReloadPlugin],
   })
