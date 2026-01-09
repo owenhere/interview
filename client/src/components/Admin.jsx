@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react'
-import { Card, Button, Input, List, Typography, Space, Popconfirm, message, Drawer, Divider, Tag } from 'antd'
+import React, { useEffect, useMemo, useState } from 'react'
+import { Card, Button, Input, List, Typography, Space, Popconfirm, message, Drawer, Divider, Tag, Modal } from 'antd'
 import { LockOutlined, ArrowLeftOutlined } from '@ant-design/icons'
 import {
   adminLogin,
@@ -26,6 +26,7 @@ export default function Admin() {
   const [status, setStatus] = useState({ openAiConfigured: null })
   const [selectedId, setSelectedId] = useState(null)
   const [drawerOpen, setDrawerOpen] = useState(false)
+  const [linksModalOpen, setLinksModalOpen] = useState(false)
   // manual transcript removed - server will auto-transcribe uploaded recordings
 
   useEffect(() => {
@@ -224,6 +225,17 @@ export default function Admin() {
 
   const selected = selectedId ? recordings.find(r => r.id === selectedId) : null
 
+  const sortedInterviews = useMemo(() => {
+    const arr = Array.isArray(interviews) ? [...interviews] : []
+    arr.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
+    return arr
+  }, [interviews])
+
+  const previewLinks = useMemo(() => {
+    // Keep the admin page compact; show the rest behind "More".
+    return sortedInterviews.slice(0, 3)
+  }, [sortedInterviews])
+
   useEffect(() => {
     // "Live" update: while drawer is open and analysis isn't ready yet, poll recordings.
     if (!drawerOpen || !token || !selectedId) return
@@ -295,16 +307,24 @@ export default function Admin() {
             </Space>
           </div>
 
-          {interviews.length > 0 && (
+          {sortedInterviews.length > 0 && (
             <div style={{ marginTop: 12 }}>
-              <div style={{ fontWeight: 700, marginBottom: 8 }}>Saved Session Links</div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 8 }}>
+                <div style={{ fontWeight: 700 }}>Saved Session Links</div>
+                {sortedInterviews.length > 3 ? (
+                  <Button size="small" onClick={() => setLinksModalOpen(true)}>
+                    More ({sortedInterviews.length})
+                  </Button>
+                ) : null}
+              </div>
               <List
                 size="small"
-                dataSource={interviews}
+                dataSource={previewLinks}
                 renderItem={(iv) => (
                   <List.Item
                     actions={[
                       <Button key="copy" size="small" onClick={() => copyLink(iv.id)}>Copy link</Button>,
+                      <Button key="open" size="small" onClick={() => window.open(getInterviewLink(iv.id), '_blank', 'noreferrer')}>Open</Button>,
                       <Popconfirm key="del" title="Delete this interview session link?" onConfirm={() => removeInterview(iv.id)} okText="Delete" cancelText="Cancel">
                         <Button danger size="small">Delete</Button>
                       </Popconfirm>,
@@ -312,7 +332,14 @@ export default function Admin() {
                   >
                     <div style={{ display: 'flex', flexDirection: 'column' }}>
                       <div className="admin-link-title">{iv.stack || 'Unknown stack'}</div>
-                      <a className="admin-link-url" href={getInterviewLink(iv.id)} target="_blank" rel="noreferrer">
+                      <a
+                        className="admin-link-url"
+                        href={getInterviewLink(iv.id)}
+                        target="_blank"
+                        rel="noreferrer"
+                        title={getInterviewLink(iv.id)}
+                        style={{ maxWidth: 680, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                      >
                         {getInterviewLink(iv.id)}
                       </a>
                       <div className="muted" style={{ fontSize: 12 }}>
@@ -325,11 +352,49 @@ export default function Admin() {
             </div>
           )}
 
-          {interviews.length === 0 && (
+          {sortedInterviews.length === 0 && (
             <div className="muted" style={{ marginTop: 12 }}>No interview links yet. Create one above.</div>
           )}
         </Card>
       </div>
+
+      <Modal
+        open={linksModalOpen}
+        onCancel={() => setLinksModalOpen(false)}
+        footer={[
+          <Button key="close" type="primary" onClick={() => setLinksModalOpen(false)}>
+            Close
+          </Button>
+        ]}
+        title="All interview session links"
+        width={820}
+      >
+        <List
+          size="small"
+          dataSource={sortedInterviews}
+          renderItem={(iv) => (
+            <List.Item
+              actions={[
+                <Button key="copy" size="small" onClick={() => copyLink(iv.id)}>Copy</Button>,
+                <Button key="open" size="small" onClick={() => window.open(getInterviewLink(iv.id), '_blank', 'noreferrer')}>Open</Button>,
+                <Popconfirm key="del" title="Delete this interview session link?" onConfirm={() => removeInterview(iv.id)} okText="Delete" cancelText="Cancel">
+                  <Button danger size="small">Delete</Button>
+                </Popconfirm>,
+              ]}
+            >
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                <div style={{ fontWeight: 700 }}>{iv.stack || 'Unknown stack'}</div>
+                <div style={{ fontSize: 12 }}>
+                  <a href={getInterviewLink(iv.id)} target="_blank" rel="noreferrer">{getInterviewLink(iv.id)}</a>
+                </div>
+                <div className="muted" style={{ fontSize: 12 }}>
+                  {iv.createdAt ? new Date(iv.createdAt).toLocaleString() : ''}
+                </div>
+              </div>
+            </List.Item>
+          )}
+        />
+      </Modal>
 
       {recordings.length === 0 && <div className="muted">No recordings yet.</div>}
 
