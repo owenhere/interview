@@ -1,0 +1,188 @@
+:root{
+  --bg:#020617;
+  --card: linear-gradient(180deg, rgba(15,23,42,0.96), rgba(15,23,42,0.94));
+  --muted: rgba(148,163,184,0.9);
+  --accent:#3b82f6;
+  --accent-2:#2563eb;
+  --glass: rgba(15,23,42,0.92);
+  --radius: 12px;
+  --shadow: 0 18px 45px rgba(0,0,0,0.85);
+}
+
+.interview-page{
+  min-height:100vh;
+  background: radial-gradient(circle at top, #111827 0%, #020617 55%, #020617 100%);
+  color:#e5e7eb;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  padding:28px;
+  box-sizing:border-box;
+}
+
+.interview-shell{
+  width:100%;
+  max-width:1200px;
+  display:flex;
+  flex-direction:column;
+  gap:20px;
+}
+
+.session-header{
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  background:rgba(15,23,42,0.98);
+  border-radius:var(--radius);
+  padding:16px 22px;
+  box-shadow:var(--shadow);
+  border:1px solid rgba(148,163,184,0.35);
+}
+.session-title{font-weight:700;font-size:18px;color:#f9fafb;margin-bottom:2px}
+.session-subtitle{font-size:13px;color:var(--muted)}
+.session-timer{text-align:right}
+.session-timer-label{font-size:12px;color:var(--muted);margin-bottom:4px}
+.session-timer-value{font-size:16px;font-weight:600;color:#e5e7eb}
+
+.session-layout{
+  display:grid;
+  grid-template-columns: minmax(0, 2.1fr) minmax(0, 1.4fr);
+  gap:20px;
+  align-items:start;
+}
+
+.session-main,
+.session-side{
+  display:flex;
+  flex-direction:column;
+  gap:18px;
+}
+
+/* ensure camera column on the left and description/questions on the right */
+.session-main{
+  grid-column:1;
+}
+.session-side{
+  grid-column:2;
+}
+
+.session-card{
+  background:var(--card);
+  border-radius:var(--radius);
+  padding:18px;
+  box-shadow: var(--shadow);
+  border:1px solid rgba(15,23,42,0.9);
+}
+.session-card-title{font-size:14px;font-weight:600;color:#e5e7eb;margin-bottom:12px}
+.session-copy{font-size:13px;color:var(--muted);line-height:1.6;margin:0 0 10px}
+.session-meta{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-top:8px}
+
+.camera-wrapper{
+  position:relative;
+  border-radius:var(--radius);
+  overflow:hidden;
+  background:#000;
+  margin-bottom:14px;
+}
+.video-preview{
+  width:100%;
+  max-width:900px;
+  height:auto;
+  aspect-ratio:16/9;
+  background:#000;
+  border-radius:10px;
+  object-fit:cover;
+}
+.camera-status-pill{
+  position:absolute;
+  bottom:12px;
+  right:12px;
+  padding:6px 12px;
+  border-radius:999px;
+  background:rgba(15,23,42,0.92);
+  color:#e5e7eb;
+  font-size:12px;
+  font-weight:600;
+}
+
+.device-row{display:flex;flex-direction:column;margin-bottom:8px}
+.device-label{font-size:12px;color:var(--muted);margin-bottom:4px}
+.device-placeholder{
+  font-size:13px;
+  padding:10px 12px;
+  border-radius:8px;
+  border:1px solid rgba(148,163,184,0.4);
+  background:rgba(15,23,42,0.96);
+  color:#e5e7eb;
+}
+
+.ready-card .session-copy{margin-bottom:14px}
+.session-question-text{font-size:15px;color:#e5e7eb;margin:0 0 12px;line-height:1.5}
+
+.controls-row{ margin-top:6px }
+.controls-row .ant-btn{padding:10px 18px;border-radius:10px}
+.controls-row .ant-btn.ant-btn-dangerous{background:linear-gradient(90deg,#ef4444,#dc2626);border:none}
+
+.question-nav{
+  display:flex;
+  justify-content:space-between;
+  gap:8px;
+  margin-top:10px;
+}
+.question-nav .ant-btn:not(.ant-btn-primary):not(.ant-btn-dangerous){
+  color:#e5e7eb;
+  background:rgba(15,23,42,0.96);
+  border:1px solid rgba(148,163,184,0.35);
+}
+.question-nav .ant-btn:not(.ant-btn-primary):not(.ant-btn-dangerous):hover{
+  color:#f9fafb;
+  border-color:rgba(37,99,235,0.8);
+  background:rgba(15,23,42,1);
+}
+.question-nav .ant-btn:not(.ant-btn-primary):not(.ant-btn-dangerous)[disabled],
+.question-nav .ant-btn:not(.ant-btn-primary):not(.ant-btn-dangerous).ant-btn-disabled{
+  color:rgba(148,163,184,0.6);
+  border-color:rgba(148,163,184,0.2);
+  background:rgba(15,23,42,0.6);
+}
+.progress-bar{
+  height:10px;
+  background:rgba(15,23,42,0.9);
+  border-radius:999px;
+  overflow:hidden;
+  margin-top:12px;
+}
+.progress-inner{
+  height:100%;
+  background:linear-gradient(90deg, var(--accent), var(--accent-2));
+  transition:width 300ms ease;
+}
+
+/* mobile / small screens */
+@media (max-width: 900px){
+  .interview-page{
+    padding:16px;
+    align-items:flex-start;
+  }
+  .session-layout{
+    grid-template-columns:1fr;
+  }
+  .session-main,
+  .session-side{
+    grid-column:auto;
+  }
+  .video-preview{
+    height:220px;
+    aspect-ratio:auto;
+  }
+  .session-header{
+    padding:12px 16px;
+  }
+  .session-card{
+    padding:14px;
+  }
+  .session-timer{
+    display:none;
+  }
+}
+

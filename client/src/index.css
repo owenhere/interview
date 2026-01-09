@@ -1,0 +1,145 @@
+:root{
+	--bg-dark: #020617;
+	--bg-dark-2: #020617;
+	--surface: rgba(15,23,42,0.96);
+	--glass: rgba(15,23,42,0.9);
+	--text: #e5e7eb;
+	--muted: rgba(148,163,184,0.9);
+	--accent: #2563eb;
+	--accent-2: #1d4ed8;
+	--radius: 12px;
+	--shadow-1: 0 18px 45px rgba(0,0,0,0.85);
+}
+
+*{box-sizing:border-box;font-family:Inter, 'Segoe UI', Roboto, Arial, sans-serif}
+html,body,#root{height:100%;}
+body{margin:0;background:linear-gradient(180deg,var(--bg-dark),var(--bg-dark-2));color:var(--text);-webkit-font-smoothing:antialiased}
+/* Let the browser render form controls in dark mode where supported */
+body{color-scheme:dark;}
+
+.app{min-height:100%;display:flex;flex-direction:column}
+.header{display:flex;align-items:center;justify-content:space-between;padding:18px 28px;border-bottom:1px solid rgba(255,255,255,0.03)}
+.header-inner{display:flex;align-items:center;justify-content:space-between;width:100%}
+.brand{display:flex;align-items:center;gap:12px}
+.logo{width:44px;height:44px;border-radius:10px;background:linear-gradient(135deg,var(--accent),var(--accent-2));box-shadow:var(--shadow-1);display:flex;align-items:center;justify-content:center;font-weight:700;color:#062344}
+.brand-title{font-size:18px;margin:0;color:var(--text);font-weight:700;letter-spacing:0.02em}
+.container{flex:1;display:flex;align-items:center;justify-content:center;padding:1.5rem;min-height:100vh}
+
+.candidate-page{
+  flex:1;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  padding:1.5rem;
+  min-height:100vh;
+}
+
+.card{background:linear-gradient(180deg,rgba(255,255,255,0.02),rgba(255,255,255,0.01));backdrop-filter: blur(6px);padding:28px;border-radius:var(--radius);border:1px solid rgba(255,255,255,0.03);box-shadow:var(--shadow-1);width:760px;max-width:96%;color:var(--text);margin:auto}
+.card.wide{width:1000px;height:calc(100vh - 120px);}
+.card h1,.card h2{margin:0 0 8px 0}
+
+.candidate-card{max-width:520px;background:#0b1627;border-color:rgba(255,255,255,0.04);box-shadow:0 18px 45px rgba(0,0,0,0.75);padding:32px 32px 26px}
+.candidate-title{margin-bottom:6px !important}
+.candidate-subtitle{display:block;margin-bottom:24px !important;color:var(--muted);font-size:13px;line-height:1.6}
+.form-field{margin-bottom:20px}
+.form-field--first{margin-top:12px}
+.field-label{font-size:13px;color:var(--muted);margin-bottom:6px}
+.field-required{color:#ff6b6b;margin-left:2px}
+.form-actions{margin-top:6px}
+.small-note{font-size:11px;margin-top:12px;line-height:1.5}
+
+.candidate-card .ant-input,
+.candidate-card .ant-input-affix-wrapper{
+	background:#020617;
+	border-color:#1f2937;
+	color:#e5e7eb;
+}
+.candidate-card .ant-input-affix-wrapper:hover,
+.candidate-card .ant-input-affix-wrapper-focused{
+	border-color:#2563eb;
+	box-shadow:0 0 0 1px rgba(37,99,235,0.6);
+}
+.candidate-card .ant-input::placeholder,
+.candidate-card .ant-input-affix-wrapper input::placeholder{
+	color:rgba(148,163,184,0.8);
+}
+.candidate-card .ant-btn-primary{
+	background:#2563eb;
+	border-color:#2563eb;
+	box-shadow:none;
+	font-weight:600;
+}
+.candidate-card .ant-btn-primary:hover{
+	background:#1d4ed8;
+	border-color:#1d4ed8;
+}
+
+/* Fix Ant Design default dark text on dark backgrounds */
+.candidate-card,
+.candidate-card .ant-typography,
+.candidate-card .ant-typography h1,
+.candidate-card .ant-typography h2,
+.candidate-card .ant-typography h3,
+.candidate-card .ant-typography h4,
+.candidate-card .ant-typography h5,
+.candidate-card .ant-typography h6{
+	color:var(--text) !important;
+}
+.candidate-card .ant-typography.ant-typography-secondary{
+	color:var(--muted) !important;
+}
+
+label{display:block;color:var(--text);font-weight:600}
+input[type="text"], input[type="password"], input[type="email"], textarea{width:100%;padding:12px 14px;margin-top:8px;margin-bottom:12px;border-radius:10px;border:1px solid rgba(255,255,255,0.06);background:rgba(0,0,0,0.22);color:var(--text)}
+button{background:linear-gradient(90deg,var(--accent),var(--accent-2));color:#042027;border:none;padding:10px 14px;border-radius:10px;cursor:pointer;font-weight:600}
+button.secondary{background:transparent;border:1px solid rgba(255,255,255,0.06);color:var(--muted)}
+
+.question{margin-top:16px;padding:18px;border-radius:12px;background:linear-gradient(180deg,rgba(255,255,255,0.01),rgba(255,255,255,0.005));border:1px solid rgba(255,255,255,0.02)}
+.question p{margin:8px 0 0 0;color:var(--text);font-size:16px}
+
+.media-wrap{display:flex;gap:18px;margin-top:18px}
+.video-frame{flex:1;background:linear-gradient(180deg,rgba(255,255,255,0.01),rgba(255,255,255,0.005));border-radius:12px;border:1px solid rgba(255,255,255,0.03);padding:8px;display:flex;flex-direction:column;align-items:center}
+.video-full{width:100%;height:100%;object-fit:cover;background:#000;border-radius:8px}
+
+.interview-fullscreen{display:grid;grid-template-columns:1fr 360px;gap:20px;height:100%;padding:20px}
+.video-area{position:relative;border-radius:12px;overflow:hidden;background:#000}
+.question-overlay{position:absolute;left:24px;bottom:24px;right:24px;padding:18px;background:linear-gradient(180deg, rgba(2,6,23,0.28), rgba(2,6,23,0.6));border-radius:10px}
+.question-big{font-size:28px;color:#fff;font-weight:700}
+.question-meta{color:var(--muted);margin-top:8px}
+.controls-area{display:flex;flex-direction:column}
+
+.controls{display:flex;gap:10px;margin-top:14px;flex-wrap:wrap}
+.controls .btn{min-width:120px}
+
+.progress{height:8px;background:rgba(255,255,255,0.03);border-radius:8px;overflow:hidden;margin-top:12px}
+.progress > i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--accent-2));width:40%}
+
+.admin-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px;margin-top:12px}
+.rec-card{background:rgba(255,255,255,0.01);padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,0.03)}
+.rec-card video{max-height:160px}
+.rec-card,
+.rec-card .ant-card-body{
+	color:var(--text);
+}
+
+.admin-link-title{
+	font-weight:700;
+	color:var(--text);
+	margin-bottom:4px;
+}
+.admin-link-url{
+	font-size:12px;
+	color:rgba(147,197,253,0.95);
+	text-decoration:none;
+	word-break:break-all;
+}
+.admin-link-url:hover{
+	text-decoration:underline;
+}
+
+.muted{color:var(--muted);font-size:13px}
+
+@media (max-width:900px){
+	.card{width:95%;padding:18px}
+	.media-wrap{flex-direction:column}
+}

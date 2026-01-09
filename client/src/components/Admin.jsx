@@ -1,0 +1,419 @@
+import React, { useEffect, useState } from 'react'
+import { Card, Button, Input, List, Typography, Space, Popconfirm, message, Drawer, Divider, Tag } from 'antd'
+import { LockOutlined, ArrowLeftOutlined } from '@ant-design/icons'
+import {
+  adminLogin,
+  fetchRecordings as apiFetchRecordings,
+  deleteRecording as apiDeleteRecording,
+  fetchStatus,
+  fetchAdminInterviews,
+  createAdminInterview,
+  deleteAdminInterview,
+} from '../api'
+
+const { Text } = Typography
+
+const ADMIN_TOKEN_KEY = 'admin_token'
+
+export default function Admin() {
+  const [password, setPassword] = useState('')
+  const [token, setToken] = useState('')
+  const [recordings, setRecordings] = useState([])
+  const [loading, setLoading] = useState(false)
+  const [interviews, setInterviews] = useState([])
+  const [newStack, setNewStack] = useState('C#')
+  const [creating, setCreating] = useState(false)
+  const [status, setStatus] = useState({ openAiConfigured: null })
+  const [selectedId, setSelectedId] = useState(null)
+  const [drawerOpen, setDrawerOpen] = useState(false)
+  // manual transcript removed - server will auto-transcribe uploaded recordings
+
+  useEffect(() => {
+    // Restore token after refresh
+    try {
+      const saved = localStorage.getItem(ADMIN_TOKEN_KEY)
+      if (saved) {
+        setToken(saved)
+        fetchRecordings(saved)
+        fetchInterviews(saved)
+      }
+    } catch (e) {
+      // ignore storage errors
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => {
+    // Fetch server status (OpenAI configured or not) to show accurate "pending" messaging
+    let cancelled = false
+    ;(async () => {
+      try {
+        const data = await fetchStatus()
+        if (!cancelled) setStatus(data || { openAiConfigured: null })
+      } catch (e) {
+        if (!cancelled) setStatus({ openAiConfigured: null })
+      }
+    })()
+    return () => { cancelled = true }
+  }, [])
+
+  const login = async () => {
+    try {
+      setLoading(true)
+      const data = await adminLogin(password)
+      if (data.token) {
+        setToken(data.token)
+        try { localStorage.setItem(ADMIN_TOKEN_KEY, data.token) } catch (e) {}
+        await fetchRecordings(data.token)
+        await fetchInterviews(data.token)
+        message.success('Logged in as admin')
+      } else {
+        message.error('Login failed')
+      }
+    } catch (err) {
+      console.error(err)
+      message.error('Login error')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const logout = () => {
+    setToken('')
+    setRecordings([])
+    setInterviews([])
+    try { localStorage.removeItem(ADMIN_TOKEN_KEY) } catch (e) {}
+    message.success('Logged out')
+  }
+
+  const fetchInterviews = async (t) => {
+    try {
+      const data = await fetchAdminInterviews(t)
+      setInterviews(data.interviews || [])
+    } catch (err) {
+      console.error(err)
+      if (err && err.status === 401) {
+        message.error('Session expired — please log in again')
+        logout()
+      }
+    }
+  }
+
+  const createInterview = async () => {
+    const stack = (newStack || '').trim()
+    if (!stack) return message.error('Please enter a stack (e.g., C#)')
+    try {
+      setCreating(true)
+      const data = await createAdminInterview({ stack }, token)
+      if (data.ok) {
+        message.success('Interview session created')
+        await fetchInterviews(token)
+      } else {
+        message.error('Create failed')
+      }
+    } catch (err) {
+      console.error(err)
+      if (err && err.status === 401) {
+        message.error('Session expired — please log in again')
+        logout()
+      } else if (err && err.status === 404) {
+        message.error('Create failed (404). Server may be running an older version — restart the server.')
+      } else {
+        message.error(`Create error: ${err?.message || 'Unknown error'}`)
+      }
+    } finally {
+      setCreating(false)
+    }
+  }
+
+  const removeInterview = async (id) => {
+    try {
+      const data = await deleteAdminInterview(id, token)
+      if (data.ok) {
+        message.success('Interview session deleted')
+        await fetchInterviews(token)
+      } else {
+        message.error('Delete failed')
+      }
+    } catch (err) {
+      console.error(err)
+      if (err && err.status === 401) {
+        message.error('Session expired — please log in again')
+        logout()
+      } else if (err && err.status === 404) {
+        message.error('Delete failed (404). Server may be running an older version — restart the server.')
+      } else {
+        message.error(`Delete error: ${err?.message || 'Unknown error'}`)
+      }
+    }
+  }
+
+  const getInterviewLink = (id) => `${window.location.origin}/interview/${id}`
+
+  const copyLink = async (id) => {
+    const link = getInterviewLink(id)
+    try {
+      await navigator.clipboard.writeText(link)
+      message.success('Link copied')
+    } catch (e) {
+      // fallback prompt
+      window.prompt('Copy this link:', link)
+    }
+  }
+
+  const fetchRecordings = async (t) => {
+    try {
+      setLoading(true)
+      const data = await apiFetchRecordings(t)
+      setRecordings(data.recordings || [])
+    } catch (err) {
+      console.error(err)
+      if (err && err.status === 401) {
+        message.error('Session expired — please log in again')
+        logout()
+      } else {
+        message.error('Could not load recordings')
+      }
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // assessments are run automatically on the server after transcription
+
+  const deleteSession = async (id) => {
+    try {
+      const data = await apiDeleteRecording(id, token)
+      if (data.ok) fetchRecordings(token)
+      else alert('Delete failed')
+    } catch (err) {
+      console.error(err)
+      if (err && err.status === 401) {
+        message.error('Session expired — please log in again')
+        logout()
+      } else {
+        message.error('Delete error')
+      }
+    }
+  }
+
+  const openDetails = (rec) => {
+    setSelectedId(rec?.id)
+    setDrawerOpen(true)
+  }
+
+  const downloadVideo = async (url, filename) => {
+    try {
+      const resp = await fetch(url)
+      if (!resp.ok) throw new Error(`download failed (${resp.status})`)
+      const blob = await resp.blob()
+      const a = document.createElement('a')
+      const objectUrl = URL.createObjectURL(blob)
+      a.href = objectUrl
+      a.download = filename || 'recording.webm'
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 10_000)
+      message.success('Download started')
+    } catch (e) {
+      message.error('Download failed')
+      console.error(e)
+    }
+  }
+
+  const selected = selectedId ? recordings.find(r => r.id === selectedId) : null
+
+  useEffect(() => {
+    // "Live" update: while drawer is open and analysis isn't ready yet, poll recordings.
+    if (!drawerOpen || !token || !selectedId) return
+  const needsUpdate = (rec) => {
+      if (!rec) return false
+      const ai = rec.files?.[0]?.analysis?.status
+      // If server explicitly says pending, keep polling
+      if (ai === 'pending') return true
+    // If we don't have transcript yet and we don't know OpenAI status, poll for a bit.
+    if (!rec.files?.[0]?.transcript && status.openAiConfigured === null) return true
+    // If OpenAI is configured and transcript missing, poll (processing)
+    if (!rec.files?.[0]?.transcript && status.openAiConfigured === true) return true
+      return false
+    }
+
+    if (!needsUpdate(selected)) return
+
+    let ticks = 0
+    const interval = setInterval(() => {
+      ticks += 1
+      // stop after ~2 minutes to avoid infinite polling
+      if (ticks > 30) return clearInterval(interval)
+      fetchRecordings(token)
+    }, 4000)
+
+    return () => clearInterval(interval)
+  }, [drawerOpen, token, selectedId, status.openAiConfigured, selected])
+
+  if (!token) return (
+    <div className="container"><Card className="card" style={{ maxWidth: 520 }}>
+      <h2>Admin Login</h2>
+      <Text className="muted">Enter your admin password to view recordings.</Text>
+
+      <div style={{ marginTop: 12 }}>
+        <Input.Password iconRender={visible => (visible ? <LockOutlined /> : <LockOutlined />)} value={password} onChange={e => setPassword(e.target.value)} placeholder="Admin password" />
+      </div>
+
+      <div style={{ marginTop: 12, display: 'flex', gap: 8 }}>
+        <Button type="primary" onClick={login} loading={loading}>Login</Button>
+        <Button href="/" icon={<ArrowLeftOutlined />}>Back</Button>
+      </div>
+    </Card></div>
+  )
+
+  return (
+    <div className="container"><Card className="card" style={{ width: '95%', maxWidth: 1100 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div>
+          <h2 style={{ marginBottom: 0 }}>Recordings</h2>
+          <Text className="muted">{recordings.length} items</Text>
+        </div>
+        <Space>
+          <Button onClick={() => fetchRecordings(token)} loading={loading}>Refresh</Button>
+          <Button danger onClick={logout}>Logout</Button>
+        </Space>
+      </div>
+
+      <div style={{ marginTop: 16 }}>
+        <Card className="rec-card" style={{ marginBottom: 14 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <div>
+              <div style={{ fontWeight: 700, marginBottom: 4 }}>Create Interview Session Link</div>
+              <div className="muted" style={{ fontSize: 12 }}>Choose a stack (e.g., C#, Java, React). Candidates open the link to start the interview.</div>
+            </div>
+            <Space>
+              <Input value={newStack} onChange={(e) => setNewStack(e.target.value)} placeholder="Stack (e.g., C#)" style={{ width: 240 }} />
+              <Button type="primary" onClick={createInterview} loading={creating}>Create</Button>
+              <Button onClick={() => fetchInterviews(token)}>Reload Links</Button>
+            </Space>
+          </div>
+
+          {interviews.length > 0 && (
+            <div style={{ marginTop: 12 }}>
+              <div style={{ fontWeight: 700, marginBottom: 8 }}>Saved Session Links</div>
+              <List
+                size="small"
+                dataSource={interviews}
+                renderItem={(iv) => (
+                  <List.Item
+                    actions={[
+                      <Button key="copy" size="small" onClick={() => copyLink(iv.id)}>Copy link</Button>,
+                      <Popconfirm key="del" title="Delete this interview session link?" onConfirm={() => removeInterview(iv.id)} okText="Delete" cancelText="Cancel">
+                        <Button danger size="small">Delete</Button>
+                      </Popconfirm>,
+                    ]}
+                  >
+                    <div style={{ display: 'flex', flexDirection: 'column' }}>
+                      <div className="admin-link-title">{iv.stack || 'Unknown stack'}</div>
+                      <a className="admin-link-url" href={getInterviewLink(iv.id)} target="_blank" rel="noreferrer">
+                        {getInterviewLink(iv.id)}
+                      </a>
+                      <div className="muted" style={{ fontSize: 12 }}>
+                        {iv.createdAt ? new Date(iv.createdAt).toLocaleString() : ''}
+                      </div>
+                    </div>
+                  </List.Item>
+                )}
+              />
+            </div>
+          )}
+
+          {interviews.length === 0 && (
+            <div className="muted" style={{ marginTop: 12 }}>No interview links yet. Create one above.</div>
+          )}
+        </Card>
+      </div>
+
+      {recordings.length === 0 && <div className="muted">No recordings yet.</div>}
+
+      <List grid={{ gutter: 16, column: 3 }} style={{ marginTop: 12 }} dataSource={recordings} renderItem={r => (
+        <List.Item>
+          <Card className="rec-card" hoverable onClick={() => openDetails(r)}>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <div>
+                <div style={{ fontWeight: 700 }}>{r.name || r.metadata?.name || 'unknown'}</div>
+                <div className="muted" style={{ fontSize: 12 }}>{new Date(r.createdAt || r.lastUploadedAt || Date.now()).toLocaleString()}</div>
+              </div>
+              <div>
+                <Space>
+                  <Popconfirm title="Delete this session and all files?" onConfirm={() => deleteSession(r.id)} okText="Delete" cancelText="Cancel">
+                    <Button danger size="small" onClick={(e) => { e.stopPropagation() }}>Delete</Button>
+                  </Popconfirm>
+                </Space>
+              </div>
+            </div>
+            <div style={{ marginTop: 8 }}>
+              {(r.files || []).map(f => (
+                <div key={f.id} style={{ marginBottom: 8 }}>
+                  <div style={{ fontSize: 13, color: '#eee', marginBottom: 6 }}>{f.question || ''}</div>
+                  <video controls src={f.url} style={{ width: '100%', borderRadius: 8 }} />
+                </div>
+              ))}
+            </div>
+            <div style={{ marginTop: 10 }} className="muted">
+              Click to open details
+            </div>
+          </Card>
+        </List.Item>
+      )} />
+
+      <Drawer
+        open={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
+        title={selected ? (selected.name || 'Candidate') : 'Candidate'}
+        width={520}
+        styles={{
+          body: { background: '#0b1627', color: '#e5e7eb' },
+          header: { background: '#0b1627', color: '#e5e7eb', borderBottom: '1px solid rgba(148,163,184,0.25)' },
+          content: { background: '#0b1627' },
+        }}
+      >
+        {!selected ? null : (
+          <div>
+            <div className="muted" style={{ marginBottom: 10 }}>
+              {selected.metadata?.stack ? <Tag color="blue">{selected.metadata.stack}</Tag> : null}
+              {selected.metadata?.country ? <Tag color="default">{selected.metadata.country}</Tag> : null}
+              <span style={{ marginLeft: 8 }}>Session ID: {selected.id}</span>
+            </div>
+
+            <Divider style={{ borderColor: 'rgba(148,163,184,0.25)' }} />
+
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>Candidate info</div>
+            <div className="muted" style={{ marginBottom: 4 }}>Email: <strong>{selected.metadata?.email || '—'}</strong></div>
+            <div className="muted" style={{ marginBottom: 4 }}>Country: <strong>{selected.metadata?.country || '—'}</strong></div>
+            <div className="muted" style={{ marginBottom: 4 }}>Phone: <strong>{selected.metadata?.phone || '—'}</strong></div>
+
+            <Divider style={{ borderColor: 'rgba(148,163,184,0.25)' }} />
+
+            <div style={{ fontWeight: 700, marginBottom: 10 }}>Recordings</div>
+            {(selected.files || []).length === 0 ? (
+              <div className="muted">No files.</div>
+            ) : (
+              (selected.files || []).map((f) => (
+                <div key={f.id} style={{ marginBottom: 14 }}>
+                  <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>{f.filename}</div>
+                  <video controls src={f.url} style={{ width: '100%', borderRadius: 10, background: '#000' }} />
+                  <div style={{ marginTop: 8 }}>
+                    <Button size="small" onClick={() => downloadVideo(f.url, f.filename)}>
+                      Download
+                    </Button>
+                  </div>
+                  <div className="muted" style={{ marginTop: 8, fontSize: 12 }}>
+                    Transcript: {f.transcript ? f.transcript.substring(0, 220) : (status.openAiConfigured ? 'Pending…' : 'OpenAI not configured')}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        )}
+      </Drawer>
+    </Card></div>
+  )
+}

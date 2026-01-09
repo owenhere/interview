@@ -1,0 +1,48 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Node
+node_modules/
+
+# Env files
+.env
+.env.*
+!.env.example
+
+# Build / cache
+dist/
+build/
+.cache/
+.parcel-cache/
+coverage/
+
+# Client build artifacts (esbuild output)
+client/public/app.js
+client/public/app.js.map
+client/public/app.css
+client/public/app.css.map
+
+# Runtime data (do not commit recordings/uploads)
+server/uploads/
+server/chunks/
+*.webm
+*.mp4
+
+# Runtime JSON stores (local/dev)
+server/records.json
+server/interviews.json
+
+# Misc
+*.pid
+*.seed
+*.tgz
+

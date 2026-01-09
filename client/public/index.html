@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI Interview</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script src="/app.js"></script>
+    <script>
+      // Dev-only live reload: esbuild dev server exposes /esbuild (SSE) and sends "reload" on rebuild.
+      // In production builds, this endpoint doesn't exist and the code safely no-ops.
+      (function () {
+        try {
+          var es = new EventSource('/esbuild');
+          es.onmessage = function (ev) {
+            if (ev && ev.data === 'reload') window.location.reload();
+          };
+        } catch (e) {}
+      })();
+    </script>
+  </body>
+</html>
