@@ -51,6 +51,45 @@ export default function App() {
   const sessionMatch = pathname.match(/^\/interview\/([^/]+)\/?$/)
   const interviewId = sessionMatch ? sessionMatch[1] : null
 
+  // If user visits /interview or /interview/ without an ID, show a friendly message.
+  // This avoids letting candidates start an interview without an admin-created session link.
+  if (pathname === '/interview' || pathname === '/interview/' || (pathname.startsWith('/interview') && !interviewId)) {
+    return (
+      <div className="app">
+        <div className="candidate-page">
+          <Card className="candidate-card" bordered={false} role="main">
+            <Title level={3} className="candidate-title">Interview link required</Title>
+            <Text className="candidate-subtitle">
+              This page needs a valid interview session link. Please ask the recruiter/admin to send you the correct link.
+            </Text>
+
+            <Space direction="vertical" style={{ width: '100%', marginTop: 16 }}>
+              <Button type="primary" size="large" block href="/">
+                Go to home
+              </Button>
+            </Space>
+          </Card>
+        </div>
+      </div>
+    )
+  }
+
+  // Root (/) should not start an interview; candidates must use /interview/:id.
+  if (!interviewId) {
+    return (
+      <div className="app">
+        <div className="candidate-page">
+          <Card className="candidate-card" bordered={false} role="main">
+            <Title level={3} className="candidate-title">No active interview session</Title>
+            <Text className="candidate-subtitle">
+              Please open the interview session link provided by the admin (it looks like <strong>/interview/&lt;id&gt;</strong>).
+            </Text>
+          </Card>
+        </div>
+      </div>
+    )
+  }
+
   const resetLocked = () => {
     localStorage.removeItem('interview_locked')
     setLocked(false)
