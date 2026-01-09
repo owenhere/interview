@@ -62,12 +62,6 @@ export default function App() {
             <Text className="candidate-subtitle">
               This page needs a valid interview session link. Please ask the recruiter/admin to send you the correct link.
             </Text>
-
-            <Space direction="vertical" style={{ width: '100%', marginTop: 16 }}>
-              <Button type="primary" size="large" block href="/">
-                Go to home
-              </Button>
-            </Space>
           </Card>
         </div>
       </div>

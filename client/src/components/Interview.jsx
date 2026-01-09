@@ -1,7 +1,7 @@
 ﻿import React, { useEffect, useRef, useState } from 'react'
 import { Card, Button, message, Modal, Spin } from 'antd'
 import '../styles/interview.css'
-import { AudioOutlined, StopOutlined } from '@ant-design/icons'
+import { AudioOutlined, StopOutlined, SoundOutlined, AudioMutedOutlined } from '@ant-design/icons'
 import { API_BASE, generateQuestions, finalizeUpload } from '../api'
 
 const MAX_DURATION_SECONDS = 10 * 60
@@ -54,6 +54,8 @@ export default function Interview({ name, email, country, phone, interviewId, st
   const [uploading, setUploading] = useState(false)
   const [uploadError, setUploadError] = useState('')
   const [thankYouOpen, setThankYouOpen] = useState(false)
+  const [speaking, setSpeaking] = useState(false)
+  const [voiceLevel, setVoiceLevel] = useState(0)
   const mediaRef = useRef(null)
   const recorderRef = useRef(null)
   const chunksRef = useRef([])
@@ -61,6 +63,12 @@ export default function Interview({ name, email, country, phone, interviewId, st
   const uploadPromiseRef = useRef(null)
   const uploadQueueRef = useRef(Promise.resolve())
   const hasChunkRef = useRef(false)
+  const audioCtxRef = useRef(null)
+  const analyserRef = useRef(null)
+  const audioDataRef = useRef(null)
+  const voiceRafRef = useRef(null)
+  const lastVoiceTickRef = useRef(0)
+  const speakingRef = useRef(false)
 
   useEffect(() => {
     let cancelled = false
@@ -142,18 +150,95 @@ export default function Interview({ name, email, country, phone, interviewId, st
     }
   }, [mediaStream])
 
+  const stopVoiceDetection = () => {
+    try {
+      if (voiceRafRef.current) cancelAnimationFrame(voiceRafRef.current)
+    } catch (e) {}
+    voiceRafRef.current = null
+    analyserRef.current = null
+    audioDataRef.current = null
+    try {
+      if (audioCtxRef.current) audioCtxRef.current.close()
+    } catch (e) {}
+    audioCtxRef.current = null
+    speakingRef.current = false
+    setSpeaking(false)
+    setVoiceLevel(0)
+  }
+
+  const startVoiceDetection = async (stream) => {
+    stopVoiceDetection()
+    try {
+      if (!stream) return
+      const AudioCtx = window.AudioContext || window.webkitAudioContext
+      if (!AudioCtx) return
+
+      const ctx = new AudioCtx()
+      audioCtxRef.current = ctx
+      // This call is safe in a user-gesture initiated flow (startRecording click)
+      try { await ctx.resume() } catch (e) {}
+
+      const source = ctx.createMediaStreamSource(stream)
+      const analyser = ctx.createAnalyser()
+      analyser.fftSize = 2048
+      analyser.smoothingTimeConstant = 0.85
+      source.connect(analyser)
+      analyserRef.current = analyser
+      audioDataRef.current = new Uint8Array(analyser.fftSize)
+
+      const THRESHOLD = 0.035 // RMS threshold; tuned for typical laptop mics
+      const tick = (t) => {
+        const a = analyserRef.current
+        const buf = audioDataRef.current
+        if (!a || !buf) return
+
+        a.getByteTimeDomainData(buf)
+        let sum = 0
+        for (let i = 0; i < buf.length; i++) {
+          const v = (buf[i] - 128) / 128
+          sum += v * v
+        }
+        const rms = Math.sqrt(sum / buf.length)
+
+        // Update UI at ~8fps to avoid excessive re-renders
+        if (!lastVoiceTickRef.current || (t - lastVoiceTickRef.current) > 120) {
+          lastVoiceTickRef.current = t
+          setVoiceLevel(rms)
+          const isSpeakingNow = rms > THRESHOLD
+          if (isSpeakingNow !== speakingRef.current) {
+            speakingRef.current = isSpeakingNow
+            setSpeaking(isSpeakingNow)
+          }
+        }
+
+        voiceRafRef.current = requestAnimationFrame(tick)
+      }
+
+      voiceRafRef.current = requestAnimationFrame(tick)
+    } catch (e) {
+      console.warn('voice detection unavailable', e)
+      stopVoiceDetection()
+    }
+  }
+
   const startCamera = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
       setMediaStream(stream)
       if (mediaRef.current) mediaRef.current.srcObject = stream
+      return stream
     } catch (err) {
       console.warn('Could not access camera/microphone', err)
+      return null
     }
   }
 
   const startRecording = async () => {
-    if (!mediaStream) await startCamera()
+    let stream = mediaRef.current?.srcObject || mediaStream
+    if (!stream) stream = await startCamera()
+    // best-effort voice detection (does not block recording)
+    if (stream) startVoiceDetection(stream)
+
     chunksRef.current = []
     const preferred = pickBestMimeType()
     const options = {
@@ -164,7 +249,7 @@ export default function Interview({ name, email, country, phone, interviewId, st
       videoBitsPerSecond: 800_000,
       audioBitsPerSecond: 64_000,
     }
-    const mr = new MediaRecorder(mediaRef.current.srcObject || mediaStream, options)
+    const mr = new MediaRecorder(stream || mediaRef.current.srcObject || mediaStream, options)
     recorderRef.current = mr
     let chunkIndex = 0
     setLastRecording(null)
@@ -254,6 +339,7 @@ export default function Interview({ name, email, country, phone, interviewId, st
   }
 
   const stopRecording = async () => {
+    stopVoiceDetection()
     if (recorderRef.current && recorderRef.current.state !== 'inactive') recorderRef.current.stop()
     setRecording(false)
     try { if (uploadPromiseRef.current) await uploadPromiseRef.current } catch (e) { console.warn(e) }
@@ -313,6 +399,28 @@ export default function Interview({ name, email, country, phone, interviewId, st
                 <div className="camera-status-pill">
                   {recording ? 'Recording' : 'Ready'}
                 </div>
+                {recording ? (
+                  (() => {
+                    // Normalize RMS into a 0..1 "volume" for UI.
+                    // Typical RMS values on laptop mics are small (often < 0.12).
+                    const volume = Math.max(0, Math.min(1, (voiceLevel - 0.02) / 0.10))
+                    const iconScale = speaking ? (0.95 + volume * 0.65) : 0.95
+                    const meterWidth = 44 // px
+                    const meterFill = Math.round(meterWidth * volume)
+                    return (
+                      <div className={`voice-status-pill ${speaking ? 'speaking' : 'silent'}`} title={`Mic level: ${(voiceLevel * 100).toFixed(1)}%`}>
+                    <span className="voice-dot" />
+                    <span className="voice-icon" style={{ transform: `scale(${iconScale})` }}>
+                      {speaking ? <SoundOutlined /> : <AudioMutedOutlined />}
+                    </span>
+                    <span>{speaking ? 'Speaking' : 'Silent'}</span>
+                    <span className="voice-meter" aria-hidden="true">
+                      <span className="voice-meter-fill" style={{ width: `${meterFill}px` }} />
+                    </span>
+                  </div>
+                    )
+                  })()
+                ) : null}
               </div>
             </Card>
             <Card className="session-card">
@@ -358,7 +466,9 @@ export default function Interview({ name, email, country, phone, interviewId, st
                   </Button>
                 ) : (
                   <Button
+                    type="primary"
                     danger
+                    className="finish-button"
                     icon={<StopOutlined />}
                     size="large"
                     block
@@ -375,7 +485,6 @@ export default function Interview({ name, email, country, phone, interviewId, st
                     Previous
                   </Button>
                   <Button
-                    type="primary"
                     onClick={() => setIndex(i => Math.min(i + 1, questions.length - 1))}
                     disabled={index === questions.length - 1}
                   >

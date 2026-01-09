@@ -105,6 +105,73 @@
   font-weight:600;
 }
 
+.voice-status-pill{
+  position:absolute;
+  bottom:12px;
+  left:12px;
+  display:flex;
+  align-items:center;
+  gap:8px;
+  padding:6px 12px;
+  border-radius:999px;
+  background:rgba(15,23,42,0.92);
+  color:#e5e7eb;
+  font-size:12px;
+  font-weight:600;
+  border:1px solid rgba(148,163,184,0.25);
+  user-select:none;
+}
+.voice-icon{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  transform-origin:center;
+  transition: transform 120ms ease;
+}
+.voice-meter{
+  width:44px;
+  height:8px;
+  border-radius:999px;
+  overflow:hidden;
+  background:rgba(148,163,184,0.20);
+  border:1px solid rgba(148,163,184,0.20);
+  margin-left:2px;
+}
+.voice-meter-fill{
+  display:block;
+  height:100%;
+  width:0;
+  border-radius:999px;
+  background:linear-gradient(90deg, rgba(34,197,94,0.85), rgba(59,130,246,0.85));
+  transition: width 120ms ease;
+}
+.voice-status-pill .voice-dot{
+  width:8px;
+  height:8px;
+  border-radius:999px;
+  background:rgba(148,163,184,0.85);
+  box-shadow:0 0 0 0 rgba(148,163,184,0);
+}
+.voice-status-pill.speaking{
+  background:rgba(34,197,94,0.16);
+  border-color:rgba(34,197,94,0.35);
+  color:#bbf7d0;
+}
+.voice-status-pill.speaking .voice-dot{
+  background:#22c55e;
+  animation: voicePulse 1.1s ease-in-out infinite;
+}
+.voice-status-pill.silent{
+  background:rgba(15,23,42,0.92);
+  border-color:rgba(148,163,184,0.22);
+  color:rgba(229,231,235,0.9);
+}
+@keyframes voicePulse{
+  0%{ box-shadow:0 0 0 0 rgba(34,197,94,0.0); }
+  50%{ box-shadow:0 0 0 8px rgba(34,197,94,0.12); }
+  100%{ box-shadow:0 0 0 0 rgba(34,197,94,0.0); }
+}
+
 .device-row{display:flex;flex-direction:column;margin-bottom:8px}
 .device-label{font-size:12px;color:var(--muted);margin-bottom:4px}
 .device-placeholder{
@@ -122,6 +189,18 @@
 .controls-row{ margin-top:6px }
 .controls-row .ant-btn{padding:10px 18px;border-radius:10px}
 .controls-row .ant-btn.ant-btn-dangerous{background:linear-gradient(90deg,#ef4444,#dc2626);border:none}
+.controls-row .finish-button.ant-btn{
+  background:linear-gradient(90deg,#fb7185,#ef4444,#dc2626);
+  border:none;
+  box-shadow:0 10px 26px rgba(239,68,68,0.22);
+}
+.controls-row .finish-button.ant-btn:hover{
+  background:linear-gradient(90deg,#f43f5e,#ef4444,#b91c1c);
+  transform:translateY(-1px);
+}
+.controls-row .finish-button.ant-btn:active{
+  transform:translateY(0);
+}
 
 .question-nav{
   display:flex;
