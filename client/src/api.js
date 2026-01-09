@@ -4,7 +4,7 @@
 const API_ORIGIN =
   typeof process !== 'undefined' && process.env && typeof process.env.API_BASE !== 'undefined'
     ? process.env.API_BASE
-    : 'http://localhost:4000';
+    : '';
 
 const API_PREFIX =
   typeof process !== 'undefined' && process.env && process.env.API_PREFIX

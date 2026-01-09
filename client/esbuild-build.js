@@ -1,4 +1,36 @@
 const esbuild = require('esbuild')
+const fs = require('fs')
+const path = require('path')
+
+function loadDotEnv() {
+  // Minimal .env loader (no dependency) for build-time config.
+  // Priority: .env.local then .env (values already set in process.env win).
+  const cwd = process.cwd()
+  const files = ['.env.local', '.env']
+  for (const f of files) {
+    const p = path.join(cwd, f)
+    if (!fs.existsSync(p)) continue
+    const lines = fs.readFileSync(p, 'utf8').split(/\r?\n/)
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed || trimmed.startsWith('#')) continue
+      const eq = trimmed.indexOf('=')
+      if (eq === -1) continue
+      const key = trimmed.slice(0, eq).trim()
+      let val = trimmed.slice(eq + 1).trim()
+      if (!key) continue
+      // remove optional surrounding quotes
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1)
+      }
+      if (!Object.prototype.hasOwnProperty.call(process.env, key)) {
+        process.env[key] = val
+      }
+    }
+  }
+}
+
+loadDotEnv()
 
 function envOrDefault(key, fallback) {
   // Important: allow empty string values (e.g. API_BASE="") for same-origin deploys.
