@@ -115,6 +115,15 @@ export async function deleteRecording(id, token) {
   });
 }
 
+export async function deleteRecordingFile(sessionId, fileId, token) {
+  return request(`/admin/recordings/${encodeURIComponent(sessionId)}/files/${encodeURIComponent(fileId)}`, {
+    method: 'DELETE',
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  })
+}
+
 // Interview sessions (admin-managed)
 
 export async function fetchInterview(interviewId) {

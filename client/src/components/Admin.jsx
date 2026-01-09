@@ -5,6 +5,7 @@ import {
   adminLogin,
   fetchRecordings as apiFetchRecordings,
   deleteRecording as apiDeleteRecording,
+  deleteRecordingFile as apiDeleteRecordingFile,
   fetchStatus,
   fetchAdminInterviews,
   createAdminInterview,
@@ -194,6 +195,26 @@ export default function Admin() {
         logout()
       } else {
         message.error('Delete error')
+      }
+    }
+  }
+
+  const deleteFile = async (sessionId, fileId) => {
+    try {
+      const data = await apiDeleteRecordingFile(sessionId, fileId, token)
+      if (data.ok) {
+        message.success('Recording deleted')
+        await fetchRecordings(token)
+      } else {
+        message.error('Delete failed')
+      }
+    } catch (err) {
+      console.error(err)
+      if (err && err.status === 401) {
+        message.error('Session expired — please log in again')
+        logout()
+      } else {
+        message.error(`Delete error: ${err?.message || 'Unknown error'}`)
       }
     }
   }
@@ -480,9 +501,21 @@ export default function Admin() {
                   <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>{f.filename}</div>
                   <video controls src={f.url} style={{ width: '100%', borderRadius: 10, background: '#000' }} />
                   <div style={{ marginTop: 8 }}>
-                    <Button size="small" onClick={() => downloadVideo(f.url, f.filename)}>
-                      Download
-                    </Button>
+                    <Space>
+                      <Button size="small" onClick={() => downloadVideo(f.url, f.filename)}>
+                        Download
+                      </Button>
+                      <Popconfirm
+                        title="Delete this recording file?"
+                        onConfirm={() => deleteFile(selected.id, f.id)}
+                        okText="Delete"
+                        cancelText="Cancel"
+                      >
+                        <Button danger size="small">
+                          Delete
+                        </Button>
+                      </Popconfirm>
+                    </Space>
                   </div>
                   <div style={{ marginTop: 8 }}>
                     <div className="muted" style={{ fontSize: 12, marginBottom: 4 }}>

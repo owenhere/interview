@@ -1030,6 +1030,44 @@ app.delete(['/admin/recordings/:id', '/backend/admin/recordings/:id'], (req, res
   return res.json({ ok: true })
 })
 
+// Delete a single file within a session (protected)
+app.delete(['/admin/recordings/:sessionId/files/:fileId', '/backend/admin/recordings/:sessionId/files/:fileId'], (req, res) => {
+  if (!requireAdmin(req, res)) return
+
+  const sessionId = req.params.sessionId
+  const fileId = req.params.fileId
+  if (!sessionId || !fileId) return res.status(400).json({ error: 'sessionId and fileId required' })
+
+  const records = readRecords()
+  const session = findSession(records, sessionId)
+  if (!session) return res.status(404).json({ error: 'Session not found' })
+
+  session.files = Array.isArray(session.files) ? session.files : []
+  const idx = session.files.findIndex(f => String(f?.id) === String(fileId))
+  if (idx === -1) return res.status(404).json({ error: 'File not found' })
+
+  const file = session.files[idx]
+  session.files.splice(idx, 1)
+  session.lastUploadedAt = (session.files[session.files.length - 1]?.uploadedAt) || session.lastUploadedAt
+
+  // Remove local file from disk (if it exists)
+  try {
+    const p = path.join(UPLOAD_DIR, file.filename)
+    if (file.filename && fs.existsSync(p)) {
+      try { fs.unlinkSync(p) } catch (e) { console.warn('Could not delete', p, e.message || e) }
+    }
+  } catch (e) {}
+
+  // Persist records update
+  try {
+    fs.writeFileSync(RECORDS_FILE, JSON.stringify(records, null, 2))
+  } catch (e) {
+    return res.status(500).json({ error: 'Could not save records' })
+  }
+
+  return res.json({ ok: true, sessionId: session.id, deletedFileId: fileId, remainingFiles: session.files.length })
+})
+
 // Serve uploads statically
 app.use(['/uploads', '/backend/uploads'], express.static(UPLOAD_DIR))
 
