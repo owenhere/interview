@@ -4,7 +4,9 @@ import '../styles/interview.css'
 import { AudioOutlined, StopOutlined, SoundOutlined, AudioMutedOutlined } from '@ant-design/icons'
 import { API_BASE, generateQuestions, finalizeUpload } from '../api'
 
-const MAX_DURATION_SECONDS = 10 * 60
+// Total interview session timer shown in the header.
+// Increase if you want longer interviews.
+const MAX_DURATION_SECONDS = 15 * 60
 
 function formatTime(totalSeconds) {
   const minutes = String(Math.floor(totalSeconds / 60)).padStart(2, '0')
@@ -69,21 +71,24 @@ export default function Interview({ name, email, country, phone, interviewId, st
   const voiceRafRef = useRef(null)
   const lastVoiceTickRef = useRef(0)
   const speakingRef = useRef(false)
+  const autoStopTriggeredRef = useRef(false)
 
   useEffect(() => {
     let cancelled = false
     const fallback = [
-      'Please introduce yourself briefly and tell me what brings you here today.',
-      'Tell me about your previous company and your role there.',
-      'Describe a project you worked on recently and what your responsibilities were.'
+      'Please introduce yourself briefly (role, years of experience, and the kind of work you do most).',
+      'Walk me through a recent project you owned end-to-end. What were the requirements, your approach, and the final impact?',
+      'Describe a time you had to debug a difficult issue in production. How did you diagnose it and what did you change?',
+      'How do you communicate trade-offs to non-technical stakeholders when deadlines are tight?',
+      'What do you do to ensure code quality (testing, reviews, CI, monitoring)? Give a concrete example.'
     ]
 
     ;(async () => {
       setLoading(true)
       try {
         const data = await generateQuestions({
-          num: 3,
-          topic: 'general English job interview',
+          num: 5,
+          topic: 'professional English software engineer interview',
           stack,
         })
         if (!cancelled && Array.isArray(data.questions) && data.questions.length) {
@@ -111,6 +116,16 @@ export default function Interview({ name, email, country, phone, interviewId, st
     }, 1000)
     return () => clearInterval(interval)
   }, [recording])
+
+  useEffect(() => {
+    if (!recording) return
+    if (elapsedSeconds < MAX_DURATION_SECONDS) return
+    if (autoStopTriggeredRef.current) return
+    autoStopTriggeredRef.current = true
+    // Auto-end the interview when time runs out (same as clicking "Finish Interview").
+    stopRecording().catch(() => {})
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [elapsedSeconds, recording])
 
   useEffect(() => {
     sessionIdRef.current = `${(name || 'user').replace(/\s+/g, '_')}-${Date.now()}`
@@ -234,6 +249,8 @@ export default function Interview({ name, email, country, phone, interviewId, st
   }
 
   const startRecording = async () => {
+    // Reset auto-stop guard for a new recording.
+    autoStopTriggeredRef.current = false
     let stream = mediaRef.current?.srcObject || mediaStream
     if (!stream) stream = await startCamera()
     // best-effort voice detection (does not block recording)

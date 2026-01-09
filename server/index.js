@@ -311,28 +311,60 @@ app.post(withBackendPrefix('/generate-questions'), async (req, res) => {
   const { num = 5, topic = 'general behavioral', stack } = req.body || {};
 
   if (!OPENAI_KEY) {
-    // fallback simple questions
-    // If stack provided, keep the intended structure: intro + technical
+    // Fallback questions (used when OpenAI isn't configured)
     if (stack) {
       const fallback = [
-        `Please introduce yourself briefly and describe your experience with ${stack}.`,
-        `Explain a core concept in ${stack} that you use often, and give an example.`,
-        `Describe a difficult bug you solved in ${stack}. What was the root cause and the fix?`,
+        `Briefly introduce yourself (role, years of experience) and describe your experience with ${stack}.`,
+        `Describe a recent feature you built using ${stack}. What was your approach and what trade-offs did you make?`,
+        `Explain one core concept in ${stack} that you rely on often, and give a real example of how it helped you.`,
+        `Tell me about a difficult bug or outage you handled in a ${stack} system. How did you debug it and prevent it from happening again?`,
+        `How do you ensure quality in ${stack} projects (testing, reviews, CI, monitoring)? Give a concrete example.`,
       ].slice(0, num)
       return res.json({ questions: fallback })
     }
-    const fallback = Array.from({ length: num }).map((_, i) => `Fallback question ${i + 1} about ${topic}`);
-    return res.json({ questions: fallback });
+
+    const general = [
+      'Please introduce yourself briefly (role, years of experience, and what you’re strongest at).',
+      'Walk me through a project you owned end-to-end. What were the requirements, your design decisions, and the outcome?',
+      'Describe a time you had to debug a tricky production issue. How did you diagnose it and what did you change?',
+      'How do you communicate trade-offs and risks to stakeholders when you have limited time?',
+      'What practices do you follow to ensure code quality and reliability? Give a concrete example.',
+    ].slice(0, num)
+    return res.json({ questions: general });
   }
 
   try {
     const effectiveTopic = stack ? `${stack} technical interview` : topic
+
     const structure = stack
-      ? `Structure requirements: (1) First question MUST be an intro question (background, role, experience with ${stack}). (2) Remaining questions MUST be technical questions about ${stack} appropriate for a software engineer. Avoid overly generic questions.`
-      : ''
+      ? [
+        `You are generating interview questions for a professional software engineering interview focused on: ${stack}.`,
+        `Output MUST be valid JSON only in the shape: {"questions":["..."]}. No extra keys.`,
+        `Write ${num} questions total.`,
+        `Quality requirements:`,
+        `- Questions must be specific, senior-friendly, and realistic; avoid generic prompts like "Tell me about yourself" unless required by structure.`,
+        `- Prefer scenario-based questions that force concrete examples (design, debugging, trade-offs, testing, performance, reliability).`,
+        `- Ask in a direct interviewer voice. No fluff, no preamble, no "as an AI".`,
+        `- Keep each question to 1-2 sentences, clear and professional.`,
+        `Structure requirements:`,
+        `- Q1 MUST be an intro/background question (experience with ${stack}).`,
+        `- Include at least one question about system design/architecture or API design in ${stack}.`,
+        `- Include at least one question about debugging/production incident handling.`,
+        `- Include at least one question about performance/scalability OR security (pick one appropriate to ${stack}).`,
+        `- Include at least one question about quality (tests, CI, observability) and trade-offs.`,
+      ].join('\n')
+      : [
+        `You are generating professional interview questions for: ${effectiveTopic}.`,
+        `Output MUST be valid JSON only in the shape: {"questions":["..."]}. No extra keys.`,
+        `Write ${num} questions total.`,
+        `Quality requirements:`,
+        `- Questions must be specific, realistic, and based on real work for a software engineer.`,
+        `- Prefer scenario-based prompts requiring concrete examples (STAR).`,
+        `- Cover a mix of: ownership/project deep dive, debugging, system design, collaboration/communication, and quality.`,
+        `- Ask in a direct interviewer voice. Keep each question to 1-2 sentences.`,
+      ].join('\n')
 
     const system =
-      `You are an interview question generator. Produce a JSON array named \"questions\" containing ${num} interview questions for topic: ${effectiveTopic}. Keep them concise.\n` +
       structure;
     const body = {
       model: 'gpt-4o-mini',
@@ -374,8 +406,27 @@ app.post(withBackendPrefix('/generate-questions'), async (req, res) => {
 
   } catch (err) {
     console.error('generate-questions error', err);
-    const fallback = Array.from({ length: num }).map((_, i) => `Fallback question ${i + 1} about ${topic}`);
-    return res.json({ questions: fallback, error: err.message });
+
+    // Use the same professional fallback questions as the "no OPENAI_KEY" path.
+    if (stack) {
+      const fallback = [
+        `Briefly introduce yourself (role, years of experience) and describe your experience with ${stack}.`,
+        `Describe a recent feature you built using ${stack}. What was your approach and what trade-offs did you make?`,
+        `Explain one core concept in ${stack} that you rely on often, and give a real example of how it helped you.`,
+        `Tell me about a difficult bug or outage you handled in a ${stack} system. How did you debug it and prevent it from happening again?`,
+        `How do you ensure quality in ${stack} projects (testing, reviews, CI, monitoring)? Give a concrete example.`,
+      ].slice(0, num)
+      return res.json({ questions: fallback, error: err.message })
+    }
+
+    const general = [
+      'Please introduce yourself briefly (role, years of experience, and what you’re strongest at).',
+      'Walk me through a project you owned end-to-end. What were the requirements, your design decisions, and the outcome?',
+      'Describe a time you had to debug a tricky production issue. How did you diagnose it and what did you change?',
+      'How do you communicate trade-offs and risks to stakeholders when you have limited time?',
+      'What practices do you follow to ensure code quality and reliability? Give a concrete example.',
+    ].slice(0, num)
+    return res.json({ questions: general, error: err.message })
   }
 });
 
