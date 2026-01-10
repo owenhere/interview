@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { Card, Button, Input, List, Typography, Space, Popconfirm, message, Drawer, Divider, Tag, Modal } from 'antd'
+import { Card, Button, Input, List, Typography, Space, Popconfirm, message, Drawer, Divider, Tag, Modal, Checkbox } from 'antd'
 import { LockOutlined, ArrowLeftOutlined } from '@ant-design/icons'
 import {
   adminLogin,
@@ -34,6 +34,8 @@ export default function Admin() {
   const [selectedSession, setSelectedSession] = useState(null)
   const [detailsLoading, setDetailsLoading] = useState(false)
   const [linksModalOpen, setLinksModalOpen] = useState(false)
+  const [selectedSessionIds, setSelectedSessionIds] = useState([])
+  const [bulkDeleting, setBulkDeleting] = useState(false)
   // manual transcript removed - server will auto-transcribe uploaded recordings
 
   useEffect(() => {
@@ -232,6 +234,39 @@ export default function Admin() {
       } else {
         message.error('Delete error')
       }
+    }
+  }
+
+  const isSelected = (id) => selectedSessionIds.includes(id)
+  const toggleSelected = (id) => {
+    setSelectedSessionIds((prev) => (prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]))
+  }
+  const clearSelected = () => setSelectedSessionIds([])
+  const selectAllLoaded = () => setSelectedSessionIds(recordings.map(r => r.id))
+  const allLoadedSelected = recordings.length > 0 && recordings.every(r => selectedSessionIds.includes(r.id))
+
+  const bulkDeleteSelected = async () => {
+    if (!token) return
+    const ids = [...selectedSessionIds]
+    if (!ids.length) return
+    setBulkDeleting(true)
+    try {
+      let ok = 0
+      let fail = 0
+      for (const id of ids) {
+        try {
+          await apiDeleteRecording(id, token)
+          ok += 1
+          setSelectedSessionIds((prev) => prev.filter(x => x !== id))
+        } catch (e) {
+          fail += 1
+        }
+      }
+      if (ok) message.success(`Deleted ${ok} session${ok === 1 ? '' : 's'}`)
+      if (fail) message.error(`Failed to delete ${fail} session${fail === 1 ? '' : 's'}`)
+      await loadInitial(token)
+    } finally {
+      setBulkDeleting(false)
     }
   }
 
@@ -500,9 +535,50 @@ export default function Admin() {
 
       {recordings.length === 0 && <div className="muted">No recordings yet.</div>}
 
+      {recordings.length > 0 ? (
+        <div style={{ marginTop: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <Space>
+            <Checkbox
+              checked={allLoadedSelected}
+              indeterminate={!allLoadedSelected && selectedSessionIds.length > 0}
+              onChange={(e) => {
+                if (e.target.checked) selectAllLoaded()
+                else clearSelected()
+              }}
+            >
+              Select all (loaded)
+            </Checkbox>
+            {selectedSessionIds.length ? (
+              <Button size="small" onClick={clearSelected} disabled={bulkDeleting}>Clear</Button>
+            ) : null}
+          </Space>
+          <Space>
+            <Popconfirm
+              title={`Delete ${selectedSessionIds.length} selected session${selectedSessionIds.length === 1 ? '' : 's'}?`}
+              onConfirm={bulkDeleteSelected}
+              okText="Delete"
+              cancelText="Cancel"
+              disabled={selectedSessionIds.length === 0 || bulkDeleting}
+            >
+              <Button danger disabled={selectedSessionIds.length === 0} loading={bulkDeleting}>
+                Delete selected ({selectedSessionIds.length})
+              </Button>
+            </Popconfirm>
+          </Space>
+        </div>
+      ) : null}
+
       <List grid={{ gutter: 16, column: 3 }} style={{ marginTop: 12 }} dataSource={recordings} renderItem={r => (
         <List.Item>
           <Card className="rec-card" hoverable onClick={() => openDetails(r)}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
+              <Checkbox
+                checked={isSelected(r.id)}
+                onClick={(e) => { e.stopPropagation() }}
+                onChange={() => toggleSelected(r.id)}
+              />
+              <div style={{ flex: 1 }} />
+            </div>
             {r.thumbnailUrl ? (
               <div style={{ marginBottom: 10 }}>
                 <img
@@ -587,7 +663,20 @@ export default function Admin() {
             ) : (
               (selected.files || []).map((f) => (
                 <div key={f.id} style={{ marginBottom: 14 }}>
-                  <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>{f.filename}</div>
+                  <div className="muted" style={{ fontSize: 12, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                    <span>{f.filename}</span>
+                    {f.source ? (
+                      <Tag color={['screen', 'screen_raw', 'screen_pip'].includes(String(f.source).toLowerCase()) ? 'purple' : 'geekblue'}>
+                        {(() => {
+                          const s = String(f.source).toLowerCase()
+                          if (s === 'screen_pip') return 'Screen + Camera'
+                          if (s === 'screen' || s === 'screen_raw') return 'Screen'
+                          if (s === 'camera') return 'Camera'
+                          return s
+                        })()}
+                      </Tag>
+                    ) : null}
+                  </div>
                   <video controls src={f.url} style={{ width: '100%', borderRadius: 10, background: '#000' }} />
                   <div style={{ marginTop: 8 }}>
                     <Space>

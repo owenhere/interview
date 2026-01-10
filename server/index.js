@@ -753,12 +753,16 @@ app.post(withBackendPrefix('/upload-answer'), upload.single('video'), async (req
     path: `/uploads/${file.filename}`,
     question: metadata.question,
     index: metadata.index,
-    source: 'full',
+    source: metadata.kind ? String(metadata.kind) : 'full',
     uploadedAt: new Date().toISOString()
   }
 
   // Initialize analysis state (we grade answers; transcript is not persisted)
+  const kind = String(metadata.kind || '').toLowerCase()
+  // We evaluate the composite screen recording (screen_pip). Only raw screen-only recordings should skip evaluation.
+  const shouldEvaluate = (kind !== 'screen_raw')
   if (!OPENAI_KEY) setFileAnalysisState(fileEntry, { status: 'unavailable', message: 'OpenAI not configured (set OPENAI_API_KEY).' })
+  else if (!shouldEvaluate) setFileAnalysisState(fileEntry, { status: 'done', message: 'Screen recording saved (no evaluation).' })
   else setFileAnalysisState(fileEntry, { status: 'pending', message: 'Evaluation pending…' })
 
   try {
@@ -819,9 +823,11 @@ app.post(withBackendPrefix('/upload-answer'), upload.single('video'), async (req
 
       // Evaluation
       try {
-        const abs = path.join(UPLOAD_DIR, file.filename)
-        await enqueueAnalysisJob(() => analyzeAndGradeRecording({ absFilePath: abs, fileEntry, questions, stack: stackFromInterview || '' }))
-        await db.updateFileFields({ sessionId, fileId: fileEntry.id, patch: { analysis: fileEntry.analysis } })
+        if (shouldEvaluate) {
+          const abs = path.join(UPLOAD_DIR, file.filename)
+          await enqueueAnalysisJob(() => analyzeAndGradeRecording({ absFilePath: abs, fileEntry, questions, stack: stackFromInterview || '' }))
+          await db.updateFileFields({ sessionId, fileId: fileEntry.id, patch: { analysis: fileEntry.analysis } })
+        }
       } catch (e) {}
     })()
 
@@ -955,7 +961,7 @@ async function assembleChunks(sessionId, name, interviewId, candidate) {
   }
 
   // Mark as finalized after assembly
-  const fileEntry = { id: Date.now().toString(), filename: outName, path: `/uploads/${outName}`, question: null, index: null, uploadedAt: nowIso }
+  const fileEntry = { id: Date.now().toString(), filename: outName, path: `/uploads/${outName}`, question: null, index: null, source: 'camera', uploadedAt: nowIso }
   if (!OPENAI_KEY) setFileAnalysisState(fileEntry, { status: 'unavailable', message: 'OpenAI not configured (set OPENAI_API_KEY).' })
   else setFileAnalysisState(fileEntry, { status: 'pending', message: 'Evaluation pending…' })
 
@@ -1279,6 +1285,7 @@ app.get(withBackendPrefix('/admin/recordings'), (req, res) => {
           filename: f.filename,
           question: f.question,
           index: f.index,
+          source: f.source,
           uploadedAt: f.uploadedAt,
           url: f.remoteUrl || toAbsoluteUrl(req, `${uploadsPrefix}${f.path}`),
           thumbnailUrl: f.thumbnailPath ? toAbsoluteUrl(req, `${uploadsPrefix}${f.thumbnailPath}`) : '',
@@ -1341,6 +1348,7 @@ app.get(withBackendPrefix('/admin/recordings/:id'), (req, res) => {
         filename: f.filename,
         question: f.question,
         index: f.index,
+        source: f.source,
         uploadedAt: f.uploadedAt,
         url: f.remoteUrl || toAbsoluteUrl(req, `${uploadsPrefix}${f.path}`),
         thumbnailUrl: f.thumbnailPath ? toAbsoluteUrl(req, `${uploadsPrefix}${f.thumbnailPath}`) : '',

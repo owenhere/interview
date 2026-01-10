@@ -60,13 +60,21 @@ export default function Interview({ name, email, country, phone, interviewId, st
   const [voiceLevel, setVoiceLevel] = useState(0)
   const mediaRef = useRef(null)
   const recorderRef = useRef(null)
+  const screenRecorderRef = useRef(null)
+  const screenStreamRef = useRef(null) // display stream (for cleanup)
+  const pipRafRef = useRef(null)
   const stopReasonRef = useRef(null) // 'user' | 'timeout' | null
-  const chunksRef = useRef([])
+  const chunksRef = useRef([]) // legacy (camera chunks) - no longer uploaded
+  const screenChunksRef = useRef([])
   const questionsRef = useRef([])
   const sessionIdRef = useRef(null)
-  const uploadPromiseRef = useRef(null)
+  const uploadPromiseRef = useRef(null) // legacy; kept for safety
   const uploadQueueRef = useRef(Promise.resolve())
   const hasChunkRef = useRef(false)
+  const cameraStoppedPromiseRef = useRef(null)
+  const cameraStoppedResolveRef = useRef(null)
+  const screenStoppedPromiseRef = useRef(null)
+  const screenStoppedResolveRef = useRef(null)
   const audioCtxRef = useRef(null)
   const analyserRef = useRef(null)
   const audioDataRef = useRef(null)
@@ -203,6 +211,8 @@ export default function Interview({ name, email, country, phone, interviewId, st
   useEffect(() => {
     return () => {
       if (mediaStream) mediaStream.getTracks().forEach(t => t.stop())
+      try { if (screenStreamRef.current) screenStreamRef.current.getTracks().forEach(t => t.stop()) } catch (e) {}
+      try { if (pipRafRef.current) cancelAnimationFrame(pipRafRef.current) } catch (e) {}
     }
   }, [mediaStream])
 
@@ -293,6 +303,110 @@ export default function Interview({ name, email, country, phone, interviewId, st
     }
   }
 
+  const startDisplayStreamRequireMonitor = async () => {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+      throw new Error('Screen sharing is not supported in this browser.')
+    }
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const display = await navigator.mediaDevices.getDisplayMedia({
+        video: {
+          frameRate: { ideal: 30, max: 30 },
+          // best-effort hint; browsers may ignore
+          displaySurface: 'monitor',
+        },
+        audio: false,
+      })
+
+      const vt = display.getVideoTracks()[0]
+      const surface = vt && vt.getSettings ? vt.getSettings().displaySurface : ''
+      if (surface === 'monitor') return display
+
+      // Not entire screen; stop and ask again.
+      try { display.getTracks().forEach(t => t.stop()) } catch (e) {}
+      if (attempt < 2) {
+        setUploadError('Please share your Entire Screen (not a single tab/app). When prompted, choose "Entire Screen".')
+      }
+    }
+
+    throw new Error('Please share your Entire Screen (not a single tab/app).')
+  }
+
+  const startScreenRecorderWithCameraPip = async ({ displayStream, cameraStream }) => {
+    const screenTrack = displayStream.getVideoTracks()[0]
+    if (!screenTrack) throw new Error('No screen video track available.')
+
+    const screenVideo = document.createElement('video')
+    screenVideo.muted = true
+    screenVideo.playsInline = true
+    screenVideo.srcObject = new MediaStream([screenTrack])
+
+    const camVideo = document.createElement('video')
+    camVideo.muted = true
+    camVideo.playsInline = true
+    camVideo.srcObject = cameraStream
+
+    try { await screenVideo.play() } catch (e) {}
+    try { await camVideo.play() } catch (e) {}
+
+    const screenSettings = screenTrack.getSettings ? screenTrack.getSettings() : {}
+    const width = Math.max(640, Number(screenSettings.width) || 1280)
+    const height = Math.max(360, Number(screenSettings.height) || 720)
+
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    const ctx = canvas.getContext('2d')
+    if (!ctx) throw new Error('Canvas not supported.')
+
+    const draw = () => {
+      try {
+        ctx.drawImage(screenVideo, 0, 0, width, height)
+
+        const pipW = Math.round(width * 0.22)
+        const pipH = Math.round(pipW * 9 / 16)
+        const pad = Math.round(width * 0.02)
+        const x = width - pipW - pad
+        const y = height - pipH - pad
+
+        ctx.save()
+        ctx.fillStyle = 'rgba(0,0,0,0.35)'
+        ctx.strokeStyle = 'rgba(255,255,255,0.65)'
+        ctx.lineWidth = Math.max(2, Math.round(width * 0.002))
+        const r = Math.max(8, Math.round(width * 0.008))
+        ctx.beginPath()
+        ctx.moveTo(x + r, y)
+        ctx.arcTo(x + pipW, y, x + pipW, y + pipH, r)
+        ctx.arcTo(x + pipW, y + pipH, x, y + pipH, r)
+        ctx.arcTo(x, y + pipH, x, y, r)
+        ctx.arcTo(x, y, x + pipW, y, r)
+        ctx.closePath()
+        ctx.fill()
+        ctx.stroke()
+        ctx.clip()
+        ctx.drawImage(camVideo, x, y, pipW, pipH)
+        ctx.restore()
+      } catch (e) {}
+      pipRafRef.current = requestAnimationFrame(draw)
+    }
+    pipRafRef.current = requestAnimationFrame(draw)
+
+    const outStream = canvas.captureStream(30)
+    // Prefer mic audio for interview audio
+    const mic = cameraStream.getAudioTracks && cameraStream.getAudioTracks()[0]
+    if (mic) outStream.addTrack(mic)
+
+    const screenPreferred = pickBestMimeType()
+    const screenOptions = {
+      mimeType: screenPreferred,
+      videoBitsPerSecond: 1_400_000,
+      audioBitsPerSecond: 64_000,
+    }
+
+    const smr = new MediaRecorder(outStream, screenOptions)
+    return smr
+  }
+
   const startRecording = async () => {
     // Reset auto-stop guard for a new recording.
     autoStopTriggeredRef.current = false
@@ -306,138 +420,65 @@ export default function Interview({ name, email, country, phone, interviewId, st
       setRecording(false)
       return
     }
+
+    // Screen share is REQUIRED (and must be "Entire Screen" best-effort).
+    let display = null
+    try {
+      setUploadError('')
+      display = await startDisplayStreamRequireMonitor()
+    } catch (e) {
+      setUploadError(e?.message || 'Screen sharing is required to start the interview.')
+      setRecording(false)
+      return
+    }
     // best-effort voice detection (does not block recording)
     if (stream) startVoiceDetection(stream)
 
     chunksRef.current = []
-    const preferred = pickBestMimeType()
-    const options = {
-      mimeType: preferred,
-      // Lower bitrate => smaller files => more reliable on slow networks.
-      // Works best with H.264/MP4 when available.
-      // Keep chunks small enough for common reverse-proxy limits (often ~1MB).
-      videoBitsPerSecond: 800_000,
-      audioBitsPerSecond: 64_000,
-    }
-    let mr
+    screenChunksRef.current = []
+    // We no longer upload a separate "camera-only" file. Camera is embedded into the screen recording via PIP.
+    recorderRef.current = null
+    screenRecorderRef.current = null
+    screenStreamRef.current = display
+    setLastRecording(null)
+    setUploadError('')
+
+    // stop promises for coordination (upload after both camera+screen stop)
+    cameraStoppedPromiseRef.current = null
+    cameraStoppedResolveRef.current = null
+    screenStoppedPromiseRef.current = null
+    screenStoppedResolveRef.current = null
+
+    // Start mandatory screen recorder with camera PIP (bottom-right).
     try {
-      mr = new MediaRecorder(stream || mediaRef.current.srcObject || mediaStream, options)
+      const smr = await startScreenRecorderWithCameraPip({ displayStream: display, cameraStream: stream })
+      screenRecorderRef.current = smr
+      screenStoppedPromiseRef.current = new Promise((resolve) => { screenStoppedResolveRef.current = resolve })
+      smr.ondataavailable = (e) => {
+        if (e.data && e.data.size) screenChunksRef.current.push(e.data)
+      }
+      smr.onstop = () => {
+        try { if (screenStoppedResolveRef.current) screenStoppedResolveRef.current() } catch (e) {}
+      }
+      smr.onerror = (ev) => {
+        console.error('Screen recorder error', ev)
+        try { if (smr && smr.state !== 'inactive') smr.stop() } catch (e) {}
+      }
+
+      // If the user ends screen sharing, end the interview too.
+      try {
+        const vt = display.getVideoTracks()[0]
+        if (vt) vt.onended = () => { stopRecording().catch(() => {}) }
+      } catch (e) {}
     } catch (e) {
-      console.warn('Could not start MediaRecorder', e)
-      setUploadError('Could not start recording in this browser/device. Please try another browser.')
+      try { if (display) display.getTracks().forEach(t => t.stop()) } catch (err) {}
+      setUploadError(e?.message || 'Could not start screen recording. Please try again.')
       setRecording(false)
       return
     }
-    recorderRef.current = mr
-    let chunkIndex = 0
-    setLastRecording(null)
-    setUploadError('')
-    mr.ondataavailable = (e) => {
-      if (e.data && e.data.size) {
-        chunksRef.current.push(e.data)
-        hasChunkRef.current = true
-        const thisIndex = chunkIndex++
-        // Upload chunks sequentially to avoid flooding slow networks with parallel requests.
-        uploadQueueRef.current = uploadQueueRef.current.then(async () => {
-          const fd = new FormData()
-          const ext = (mr.mimeType || '').includes('mp4') ? 'mp4' : 'webm'
-          const filename = `${sessionIdRef.current || 'session'}-chunk-${Date.now()}.${ext}`
-          fd.append('video', e.data, filename)
-          // include candidate details so the server can persist metadata early
-          fd.append('metadata', JSON.stringify({ sessionId: sessionIdRef.current, index: thisIndex, interviewId, name, email, country, phone, source: refSource, questions: questionsRef.current }))
-          // simple retry (2 attempts) for flaky networks
-          for (let attempt = 0; attempt < 2; attempt++) {
-            try {
-              const resp = await fetch(`${API_BASE}/upload-chunk`, { method: 'POST', body: fd })
-              try { await resp.json() } catch (e) {}
-              if (!resp.ok) throw new Error(`upload-chunk failed (${resp.status})`)
-              return
-            } catch (err) {
-              // 413 usually means the server/proxy rejected the request size.
-              if (String(err?.message || '').includes('(413)')) {
-                setUploadError('Upload failed (413: file too large). Please contact the admin to increase server upload limit or try again on a stronger connection.')
-              }
-              if (attempt === 1) console.warn('chunk upload failed', err)
-              await new Promise(r => setTimeout(r, 500 * (attempt + 1)))
-            }
-          }
-        })
-      }
-    }
-    mr.onstop = () => {
-      uploadPromiseRef.current = (async () => {
-        try {
-          // If recording stopped without explicit "Finish" click or a timeout,
-          // do not upload and do not show success.
-          if (!stopReasonRef.current) {
-            setUploadError('Recording stopped unexpectedly. Please try again.')
-            return
-          }
-
-          setUploading(true)
-          setUploadError('')
-          let uploadSucceeded = false
-          // Prefer uploading one final file for reliable playback.
-          // Chunk assembly by byte concatenation can produce a corrupted WebM container in some browsers.
-          try {
-            const mimeType = (mr && mr.mimeType) ? mr.mimeType : 'video/webm'
-            const blob = new Blob(chunksRef.current, { type: mimeType })
-            const fd = new FormData()
-            const ext = mimeType.includes('mp4') ? 'mp4' : 'webm'
-            const filename = `${sessionIdRef.current || 'session'}-${Date.now()}.${ext}`
-            fd.append('video', blob, filename)
-            fd.append('metadata', JSON.stringify({ sessionId: sessionIdRef.current, name, email, country, phone, interviewId, source: refSource, questions: questionsRef.current }))
-            // Retry final upload a couple times for transient server load / network blips.
-            let lastErr = null
-            for (let attempt = 0; attempt < 3; attempt++) {
-              try {
-                const resp = await fetch(`${API_BASE}/upload-answer`, { method: 'POST', body: fd })
-                // server returns JSON; ignore parsing failures (e.g. if server errors)
-                try { await resp.json() } catch (e) {}
-                if (!resp.ok) throw new Error(`upload-answer failed (${resp.status})`)
-                lastErr = null
-                break
-              } catch (err) {
-                lastErr = err
-                await new Promise(r => setTimeout(r, 600 * (attempt + 1)))
-              }
-            }
-            if (lastErr) throw lastErr
-            setLastRecording({ blob, filename })
-            uploadSucceeded = true
-          } catch (e) {
-            console.warn('upload-answer failed; falling back to chunk finalize', e)
-            // Try finalize (best-effort). If it fails, user can still download the local recording.
-            try {
-              const r = await finalizeUpload({ sessionId: sessionIdRef.current, name, email, country, phone, interviewId, source: refSource, questions: questionsRef.current })
-              if (r && r.ok) uploadSucceeded = true
-            } catch (e2) {
-              setUploadError('Upload failed. Please try again.')
-              console.warn('finalize failed', e2)
-            }
-          }
-
-          if (uploadSucceeded) {
-            // Show a friendly confirmation modal after successful upload.
-            setThankYouOpen(true)
-          }
-        } catch (e) { console.warn('finalize failed', e) }
-        chunksRef.current = []
-        setUploading(false)
-        stopReasonRef.current = null
-      })()
-    }
-    mr.onerror = (ev) => {
-      console.error('Recorder error', ev)
-      // Mark as unexpected stop so we don't upload in onstop.
-      stopReasonRef.current = null
-      setUploadError('Recording error occurred. Please try again.')
-      try { if (mr && mr.state !== 'inactive') mr.stop() } catch (e) {}
-      setRecording(false)
-    }
     // Smaller timeslice => smaller chunks (helps avoid 413 from proxies with small body limits).
     try {
-      mr.start(2000)
+      try { if (screenRecorderRef.current) screenRecorderRef.current.start(2000) } catch (e) {}
       setRecording(true)
     } catch (e) {
       console.warn('MediaRecorder start failed', e)
@@ -446,13 +487,80 @@ export default function Interview({ name, email, country, phone, interviewId, st
     }
   }
 
+  const uploadFinal = async ({ kind, mr, chunks }) => {
+    const mimeType = (mr && mr.mimeType) ? mr.mimeType : 'video/webm'
+    const blob = new Blob(chunks || [], { type: mimeType })
+    const fd = new FormData()
+    const ext = mimeType.includes('mp4') ? 'mp4' : 'webm'
+    const filename = `${sessionIdRef.current || 'session'}-${kind}-${Date.now()}.${ext}`
+    fd.append('video', blob, filename)
+    fd.append('metadata', JSON.stringify({ sessionId: sessionIdRef.current, name, email, country, phone, interviewId, source: refSource, questions: questionsRef.current, kind }))
+    // Retry final upload a couple times for transient server load / network blips.
+    let lastErr = null
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const resp = await fetch(`${API_BASE}/upload-answer`, { method: 'POST', body: fd })
+        try { await resp.json() } catch (e) {}
+        if (!resp.ok) throw new Error(`upload-answer failed (${resp.status})`)
+        lastErr = null
+        break
+      } catch (err) {
+        lastErr = err
+        await new Promise(r => setTimeout(r, 600 * (attempt + 1)))
+      }
+    }
+    if (lastErr) throw lastErr
+    return { ok: true, blob, filename }
+  }
+
   const stopRecording = async () => {
     // Mark explicit user stop (unless already timeout).
     stopReasonRef.current = stopReasonRef.current || 'user'
     stopVoiceDetection()
-    if (recorderRef.current && recorderRef.current.state !== 'inactive') recorderRef.current.stop()
+    if (screenRecorderRef.current && screenRecorderRef.current.state !== 'inactive') {
+      try { screenRecorderRef.current.stop() } catch (e) {}
+    }
     setRecording(false)
-    try { if (uploadPromiseRef.current) await uploadPromiseRef.current } catch (e) { console.warn(e) }
+    // Wait for both recorders to finish flushing data.
+    try {
+      const waits = []
+      if (cameraStoppedPromiseRef.current) waits.push(cameraStoppedPromiseRef.current)
+      if (screenStoppedPromiseRef.current) waits.push(screenStoppedPromiseRef.current)
+      if (waits.length) await Promise.allSettled(waits)
+    } catch (e) {}
+
+    // If recording stopped without explicit "Finish" click or a timeout, do not upload.
+    if (!stopReasonRef.current) {
+      setUploadError('Recording stopped unexpectedly. Please try again.')
+      return
+    }
+
+    setUploading(true)
+    setUploadError('')
+    let ok = false
+    try {
+      if (!screenRecorderRef.current || !screenChunksRef.current.length) {
+        throw new Error('No screen recording captured.')
+      }
+      const r = await uploadFinal({ kind: 'screen_pip', mr: screenRecorderRef.current, chunks: screenChunksRef.current })
+      setLastRecording({ blob: r.blob, filename: r.filename })
+      ok = true
+    } catch (e) {
+      console.warn('upload-answer (screen_pip) failed', e)
+      ok = false
+    }
+
+    if (ok) setThankYouOpen(true)
+    else setUploadError('Upload failed. Please try again.')
+
+    // Cleanup
+    chunksRef.current = []
+    screenChunksRef.current = []
+    try { if (screenStreamRef.current) screenStreamRef.current.getTracks().forEach(t => t.stop()) } catch (e) {}
+    screenStreamRef.current = null
+    try { if (pipRafRef.current) cancelAnimationFrame(pipRafRef.current) } catch (e) {}
+    pipRafRef.current = null
+    setUploading(false)
     try { localStorage.setItem('interview_locked', 'true') } catch (e) {}
   }
 
@@ -579,6 +687,12 @@ export default function Interview({ name, email, country, phone, interviewId, st
                   {questions[index]}
                 </p>
               )}
+
+              {!recording ? (
+                <div className="muted" style={{ marginTop: 10, fontSize: 12 }}>
+                  Screen sharing is required. When prompted, choose <strong>Entire Screen</strong> (not a tab or app window).
+                </div>
+              ) : null}
 
               <div className="controls-row">
                 {!recording ? (
