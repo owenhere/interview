@@ -97,6 +97,32 @@ async function openAiChat({ systemPrompt, userContent, maxTokens = 500 }) {
   return data?.choices?.[0]?.message?.content || '';
 }
 
+function extractJsonObjectFromText(text) {
+  const s = String(text || '').trim()
+  if (!s) return null
+  try { return JSON.parse(s) } catch (e) {}
+  // Try to locate a JSON object substring
+  try {
+    const m = s.match(/\{[\s\S]*\}/)
+    if (!m) return null
+    return JSON.parse(m[0])
+  } catch (e) {}
+  return null
+}
+
+function normalizeQuestionsArray(input) {
+  if (!Array.isArray(input)) return []
+  const out = []
+  for (const q of input) {
+    const t = String(q || '').trim()
+    if (!t) continue
+    // keep questions bounded so they remain safe to store/prompt
+    out.push(t.slice(0, 500))
+    if (out.length >= 25) break
+  }
+  return out
+}
+
 /**
  * Transcribe an audio/video file using OpenAI Whisper.
  * Returns { text, error } where error is a human-readable message (or empty string).
@@ -153,6 +179,109 @@ function setFileAnalysisState(fileEntry, { status, message }) {
   fileEntry.analysis.status = status
   fileEntry.analysis.message = message || ''
   fileEntry.analysis.updatedAt = new Date().toISOString()
+}
+
+async function gradeInterviewAnswers({ questions, transcriptText, stack }) {
+  const qs = normalizeQuestionsArray(questions)
+  if (!qs.length) {
+    return { error: 'No questions provided; cannot grade per-question answers.' }
+  }
+
+  const trimmedTranscript = String(transcriptText || '').trim()
+  if (!trimmedTranscript) {
+    return { error: 'Empty transcript; cannot grade answers.' }
+  }
+
+  // Keep prompt size bounded (Whisper transcripts for long videos can get large).
+  const transcriptForPrompt = trimmedTranscript.length > 12_000
+    ? `${trimmedTranscript.slice(0, 12_000)}\n\n[Transcript truncated for length.]`
+    : trimmedTranscript
+
+  const systemPrompt =
+    `You are a strict but fair technical interviewer.\n` +
+    `Given the interview QUESTIONS and the candidate's TRANSCRIPT (a single continuous recording), you must grade the candidate's answer to EACH question.\n` +
+    `If the transcript does not clearly contain an answer to a question, score it low and explain why.\n` +
+    `Return ONLY valid JSON with this shape:\n` +
+    `{\n` +
+    `  "overallPercent": number, // 0-100\n` +
+    `  "perQuestion": [\n` +
+    `    { "index": number, "question": string, "percent": number, "feedback": string }\n` +
+    `  ],\n` +
+    `  "notes": string\n` +
+    `}\n` +
+    `Rules: percents are integers 0-100. Keep feedback concise (1-3 sentences).`
+
+  const userContent =
+    `Stack/role context: ${stack ? String(stack) : 'N/A'}\n\n` +
+    `QUESTIONS:\n${qs.map((q, i) => `${i + 1}. ${q}`).join('\n')}\n\n` +
+    `TRANSCRIPT:\n${transcriptForPrompt}\n`
+
+  const raw = await openAiChat({ systemPrompt, userContent, maxTokens: 900 })
+  const parsed = extractJsonObjectFromText(raw)
+  if (!parsed) return { error: 'Grading model returned invalid JSON.' }
+
+  const perQuestion = Array.isArray(parsed.perQuestion) ? parsed.perQuestion : []
+  const cleanedPerQuestion = perQuestion.map((x, idx) => {
+    const qIdx = Number.isFinite(Number(x?.index)) ? Number(x.index) : (idx + 1)
+    const percentRaw = Number(x?.percent)
+    const percent = Number.isFinite(percentRaw) ? Math.max(0, Math.min(100, Math.round(percentRaw))) : 0
+    return {
+      index: qIdx,
+      question: String(x?.question || qs[qIdx - 1] || qs[idx] || '').slice(0, 500),
+      percent,
+      feedback: String(x?.feedback || '').trim().slice(0, 800),
+    }
+  })
+
+  const overallRaw = Number(parsed.overallPercent)
+  const overallPercent = Number.isFinite(overallRaw)
+    ? Math.max(0, Math.min(100, Math.round(overallRaw)))
+    : Math.round(cleanedPerQuestion.reduce((a, b) => a + (b.percent || 0), 0) / Math.max(1, cleanedPerQuestion.length))
+
+  return {
+    overallPercent,
+    perQuestion: cleanedPerQuestion,
+    notes: String(parsed.notes || '').trim().slice(0, 1200),
+  }
+}
+
+async function analyzeAndGradeRecording({ absFilePath, fileEntry, session }) {
+  try {
+    if (!OPENAI_KEY) {
+      setFileAnalysisState(fileEntry, { status: 'unavailable', message: 'OpenAI not configured (set OPENAI_API_KEY).' })
+      return
+    }
+    const questions = normalizeQuestionsArray(session?.metadata?.questions || session?.questions || [])
+    if (!questions.length) {
+      setFileAnalysisState(fileEntry, { status: 'error', message: 'No questions were provided by the client; cannot grade per-question answers.' })
+      return
+    }
+
+    setFileAnalysisState(fileEntry, { status: 'pending', message: 'Evaluating answers…' })
+    const tr = await transcribeFile(absFilePath)
+    if (!tr.text) {
+      setFileAnalysisState(fileEntry, { status: 'error', message: tr.error || 'Transcription failed.' })
+      return
+    }
+
+    const graded = await gradeInterviewAnswers({ questions, transcriptText: tr.text, stack: session?.metadata?.stack })
+    if (graded.error) {
+      setFileAnalysisState(fileEntry, { status: 'error', message: graded.error })
+      return
+    }
+
+    fileEntry.analysis = fileEntry.analysis || {}
+    fileEntry.analysis.status = 'done'
+    fileEntry.analysis.message = 'Evaluation complete.'
+    fileEntry.analysis.updatedAt = new Date().toISOString()
+    fileEntry.analysis.results = {
+      overallPercent: graded.overallPercent,
+      perQuestion: graded.perQuestion,
+      notes: graded.notes,
+    }
+  } catch (err) {
+    setFileAnalysisState(fileEntry, { status: 'error', message: err?.message || 'Evaluation failed.' })
+  }
 }
 
 // Admin settings
@@ -496,6 +625,11 @@ app.post(withBackendPrefix('/upload-answer'), upload.single('video'), (req, res)
   if (metadata.country) session.metadata.country = String(metadata.country).trim()
   if (metadata.phone) session.metadata.phone = String(metadata.phone).trim()
   if (metadata.source) session.metadata.source = String(metadata.source).trim()
+  // Persist questions so we can grade per-question answers after upload.
+  if (Array.isArray(metadata.questions)) {
+    const qs = normalizeQuestionsArray(metadata.questions)
+    if (qs.length) session.metadata.questions = qs
+  }
   // Attach interviewId/stack to session for admin filtering & correct labeling
   if (metadata.interviewId) {
     session.metadata.interviewId = metadata.interviewId
@@ -517,12 +651,9 @@ app.post(withBackendPrefix('/upload-answer'), upload.single('video'), (req, res)
     uploadedAt: new Date().toISOString()
   }
 
-  // Initialize analysis state so admin UI can show accurate progress instead of "pending forever"
-  if (!OPENAI_KEY) {
-    setFileAnalysisState(fileEntry, { status: 'unavailable', message: 'OpenAI not configured (set OPENAI_API_KEY).' })
-  } else {
-    setFileAnalysisState(fileEntry, { status: 'pending', message: 'Transcription in progress.' })
-  }
+  // Initialize analysis state (we grade answers; transcript is not persisted)
+  if (!OPENAI_KEY) setFileAnalysisState(fileEntry, { status: 'unavailable', message: 'OpenAI not configured (set OPENAI_API_KEY).' })
+  else setFileAnalysisState(fileEntry, { status: 'pending', message: 'Evaluation pending…' })
 
   const finalize = async () => {
     if (cloudinaryClient) {
@@ -562,27 +693,14 @@ app.post(withBackendPrefix('/upload-answer'), upload.single('video'), (req, res)
       }
     } catch (e) {}
 
-    // After saving, attempt server-side transcription (no English level scoring)
-    try {
-      if (!OPENAI_KEY) return
-
-      const tr = await transcribeFile(path.join(UPLOAD_DIR, file.filename))
-      if (tr.text) {
-        fileEntry.transcript = tr.text
-        fs.writeFileSync(RECORDS_FILE, JSON.stringify(records, null, 2))
-      } else {
-        setFileAnalysisState(fileEntry, { status: 'error', message: tr.error || 'Transcription failed.' })
-        fs.writeFileSync(RECORDS_FILE, JSON.stringify(records, null, 2))
-        return
+    // After saving, run evaluation asynchronously (no transcript persistence).
+    ;(async () => {
+      try {
+        await analyzeAndGradeRecording({ absFilePath: path.join(UPLOAD_DIR, file.filename), fileEntry, session })
+      } finally {
+        try { fs.writeFileSync(RECORDS_FILE, JSON.stringify(records, null, 2)) } catch (e) {}
       }
-
-      setFileAnalysisState(fileEntry, { status: 'done', message: 'Transcription complete.' })
-      fs.writeFileSync(RECORDS_FILE, JSON.stringify(records, null, 2))
-    } catch (err) {
-      console.warn('post-upload AI processing failed', err.message || err)
-      setFileAnalysisState(fileEntry, { status: 'error', message: err.message || 'Transcription failed.' })
-      try { fs.writeFileSync(RECORDS_FILE, JSON.stringify(records, null, 2)) } catch (e) {}
-    }
+    })()
   }
 
   finalize().then(() => {
@@ -617,6 +735,10 @@ app.post(withBackendPrefix('/upload-chunk'), upload.single('video'), (req, res) 
     if (metadata.country) session.metadata.country = String(metadata.country).trim()
     if (metadata.phone) session.metadata.phone = String(metadata.phone).trim()
     if (metadata.source) session.metadata.source = String(metadata.source).trim()
+    if (Array.isArray(metadata.questions)) {
+      const qs = normalizeQuestionsArray(metadata.questions)
+      if (qs.length) session.metadata.questions = qs
+    }
     if (metadata.interviewId) {
       session.metadata.interviewId = metadata.interviewId
       const interviews = readJsonArray(INTERVIEWS_FILE)
@@ -703,6 +825,10 @@ async function assembleChunks(sessionId, name, interviewId, candidate) {
     if (candidate.country) session.metadata.country = String(candidate.country).trim()
     if (candidate.phone) session.metadata.phone = String(candidate.phone).trim()
     if (candidate.source) session.metadata.source = String(candidate.source).trim()
+    if (Array.isArray(candidate.questions)) {
+      const qs = normalizeQuestionsArray(candidate.questions)
+      if (qs.length) session.metadata.questions = qs
+    }
   }
   if (interviewId) {
     session.metadata.interviewId = interviewId
@@ -741,29 +867,8 @@ async function assembleChunks(sessionId, name, interviewId, candidate) {
   // trigger transcription and assessment asynchronously
   ;(async () => {
     try {
-      if (!OPENAI_KEY) {
-        setFileAnalysisState(fileEntry, { status: 'unavailable', message: 'OpenAI not configured (set OPENAI_API_KEY).' })
-        fs.writeFileSync(RECORDS_FILE, JSON.stringify(records, null, 2))
-        return
-      }
-
-      setFileAnalysisState(fileEntry, { status: 'pending', message: 'Transcription in progress.' })
-      fs.writeFileSync(RECORDS_FILE, JSON.stringify(records, null, 2))
-
-      const tr = await transcribeFile(outPath)
-      if (tr.text) {
-        fileEntry.transcript = tr.text
-        fs.writeFileSync(RECORDS_FILE, JSON.stringify(records, null, 2))
-
-        setFileAnalysisState(fileEntry, { status: 'done', message: 'Transcription complete.' })
-        fs.writeFileSync(RECORDS_FILE, JSON.stringify(records, null, 2))
-      } else {
-        setFileAnalysisState(fileEntry, { status: 'error', message: tr.error || 'Transcription failed.' })
-        fs.writeFileSync(RECORDS_FILE, JSON.stringify(records, null, 2))
-      }
-    } catch (err) {
-      console.warn('post-assemble AI failed', err.message || err)
-      setFileAnalysisState(fileEntry, { status: 'error', message: err.message || 'Transcription failed.' })
+      await analyzeAndGradeRecording({ absFilePath: outPath, fileEntry, session })
+    } finally {
       try { fs.writeFileSync(RECORDS_FILE, JSON.stringify(records, null, 2)) } catch (e) {}
     }
   })()
@@ -773,7 +878,7 @@ async function assembleChunks(sessionId, name, interviewId, candidate) {
 
 // POST /upload-complete (explicit finalization)
 app.post(withBackendPrefix('/upload-complete'), express.json(), async (req, res) => {
-  const { sessionId, name, interviewId, email, country, phone, source } = req.body || {}
+  const { sessionId, name, interviewId, email, country, phone, source, questions } = req.body || {}
   if (!sessionId) return res.status(400).json({ error: 'sessionId required' })
 
   // Guard: don't assemble while the candidate is still recording.
@@ -787,7 +892,7 @@ app.post(withBackendPrefix('/upload-complete'), express.json(), async (req, res)
   } catch (e) {}
 
   try {
-    const fileEntry = await assembleChunks(sessionId, name, interviewId, { email, country, phone, source })
+    const fileEntry = await assembleChunks(sessionId, name, interviewId, { email, country, phone, source, questions })
     return res.json({ ok: true, sessionId, file: fileEntry })
   } catch (err) {
     console.error('upload-complete failed', err.message || err)
@@ -832,7 +937,7 @@ app.get(withBackendPrefix('/upload-complete-beacon'), (req, res) => {
 
 // Accept POST beacons too (navigator.sendBeacon will POST a small payload)
 app.post(withBackendPrefix('/upload-complete-beacon'), express.json(), (req, res) => {
-  const { sessionId, name, interviewId, email, country, phone, source, force } = req.body || {}
+  const { sessionId, name, interviewId, email, country, phone, source, force, questions } = req.body || {}
   if (!sessionId) return res.status(400).json({ error: 'sessionId required' })
 
   // Guard: don't assemble while recording is active. Just accept the beacon and no-op.
@@ -844,7 +949,7 @@ app.post(withBackendPrefix('/upload-complete-beacon'), express.json(), (req, res
     }
   } catch (e) {}
 
-  assembleChunks(sessionId, name, interviewId, { email, country, phone, source }).then(file => {
+  assembleChunks(sessionId, name, interviewId, { email, country, phone, source, questions }).then(file => {
     console.log('Beacon (POST) assembled session', sessionId, '->', file.filename)
   }).catch(err => {
     if ((err && err.message) === 'no chunks found') {
@@ -1087,7 +1192,6 @@ app.get(withBackendPrefix('/admin/recordings'), (req, res) => {
       // even when the frontend is served from a different origin (e.g. preview server).
       url: f.remoteUrl || toAbsoluteUrl(req, `${uploadsPrefix}${f.path}`),
       thumbnailUrl: f.thumbnailPath ? toAbsoluteUrl(req, `${uploadsPrefix}${f.thumbnailPath}`) : '',
-      transcript: f.transcript,
       analysis: f.analysis,
     })),
     conversation: s.conversation || []
@@ -1118,7 +1222,6 @@ app.get(withBackendPrefix('/admin/recordings/:id'), (req, res) => {
       uploadedAt: f.uploadedAt,
       url: f.remoteUrl || toAbsoluteUrl(req, `${uploadsPrefix}${f.path}`),
       thumbnailUrl: f.thumbnailPath ? toAbsoluteUrl(req, `${uploadsPrefix}${f.thumbnailPath}`) : '',
-      transcript: f.transcript,
       analysis: f.analysis,
     })),
     conversation: session.conversation || []

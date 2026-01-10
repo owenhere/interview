@@ -62,6 +62,7 @@ export default function Interview({ name, email, country, phone, interviewId, st
   const recorderRef = useRef(null)
   const stopReasonRef = useRef(null) // 'user' | 'timeout' | null
   const chunksRef = useRef([])
+  const questionsRef = useRef([])
   const sessionIdRef = useRef(null)
   const uploadPromiseRef = useRef(null)
   const uploadQueueRef = useRef(Promise.resolve())
@@ -124,6 +125,7 @@ export default function Interview({ name, email, country, phone, interviewId, st
   useEffect(() => { recordingRef.current = !!recording }, [recording])
   useEffect(() => { uploadingRef.current = !!uploading }, [uploading])
   useEffect(() => { completedRef.current = !!thankYouOpen }, [thankYouOpen])
+  useEffect(() => { questionsRef.current = Array.isArray(questions) ? questions : [] }, [questions])
 
   useEffect(() => {
     if (!recording) return
@@ -153,7 +155,7 @@ export default function Interview({ name, email, country, phone, interviewId, st
         if (completedRef.current) return
         if (recorderRef.current && recorderRef.current.state !== 'inactive') return
         const url = `${API_BASE}/upload-complete-beacon`
-        const payload = JSON.stringify({ sessionId: sessionIdRef.current, name, email, country, phone, interviewId, source: refSource })
+        const payload = JSON.stringify({ sessionId: sessionIdRef.current, name, email, country, phone, interviewId, source: refSource, questions: questionsRef.current })
         if (navigator.sendBeacon) {
           const blob = new Blob([payload], { type: 'application/json' })
           navigator.sendBeacon(url, blob)
@@ -176,7 +178,7 @@ export default function Interview({ name, email, country, phone, interviewId, st
         // On unload we want best-effort finalization of chunks already uploaded.
         // Use `force:true` so the server assembles even if recordingActive is still true.
         const url = `${API_BASE}/upload-complete-beacon`
-        const payload = JSON.stringify({ sessionId: sessionIdRef.current, name, email, country, phone, interviewId, source: refSource, force: true })
+        const payload = JSON.stringify({ sessionId: sessionIdRef.current, name, email, country, phone, interviewId, source: refSource, force: true, questions: questionsRef.current })
         if (navigator.sendBeacon) {
           const blob = new Blob([payload], { type: 'application/json' })
           navigator.sendBeacon(url, blob)
@@ -342,7 +344,7 @@ export default function Interview({ name, email, country, phone, interviewId, st
           const filename = `${sessionIdRef.current || 'session'}-chunk-${Date.now()}.${ext}`
           fd.append('video', e.data, filename)
           // include candidate details so the server can persist metadata early
-          fd.append('metadata', JSON.stringify({ sessionId: sessionIdRef.current, index: thisIndex, interviewId, name, email, country, phone, source: refSource }))
+          fd.append('metadata', JSON.stringify({ sessionId: sessionIdRef.current, index: thisIndex, interviewId, name, email, country, phone, source: refSource, questions: questionsRef.current }))
           // simple retry (2 attempts) for flaky networks
           for (let attempt = 0; attempt < 2; attempt++) {
             try {
@@ -384,7 +386,7 @@ export default function Interview({ name, email, country, phone, interviewId, st
             const ext = mimeType.includes('mp4') ? 'mp4' : 'webm'
             const filename = `${sessionIdRef.current || 'session'}-${Date.now()}.${ext}`
             fd.append('video', blob, filename)
-            fd.append('metadata', JSON.stringify({ sessionId: sessionIdRef.current, name, email, country, phone, interviewId, source: refSource }))
+            fd.append('metadata', JSON.stringify({ sessionId: sessionIdRef.current, name, email, country, phone, interviewId, source: refSource, questions: questionsRef.current }))
             const resp = await fetch(`${API_BASE}/upload-answer`, { method: 'POST', body: fd })
             // server returns JSON; ignore parsing failures (e.g. if server errors)
             try { await resp.json() } catch (e) {}
@@ -395,7 +397,7 @@ export default function Interview({ name, email, country, phone, interviewId, st
             console.warn('upload-answer failed; falling back to chunk finalize', e)
             // Try finalize (best-effort). If it fails, user can still download the local recording.
             try {
-              const r = await finalizeUpload({ sessionId: sessionIdRef.current, name, email, country, phone, interviewId, source: refSource })
+              const r = await finalizeUpload({ sessionId: sessionIdRef.current, name, email, country, phone, interviewId, source: refSource, questions: questionsRef.current })
               if (r && r.ok) uploadSucceeded = true
             } catch (e2) {
               setUploadError('Upload failed. Please try again.')

@@ -332,7 +332,7 @@ export default function Admin() {
       if (!rec) return true
       const ai = rec.files?.[0]?.analysis?.status
       if (ai === 'pending') return true
-      if (!rec.files?.[0]?.transcript && status.openAiConfigured === true) return true
+      if (status.openAiConfigured === true && !rec.files?.[0]?.analysis) return true
       return false
     }
 
@@ -607,22 +607,41 @@ export default function Admin() {
                     </Space>
                   </div>
                   <div style={{ marginTop: 8 }}>
-                    <div className="muted" style={{ fontSize: 12, marginBottom: 4 }}>
-                      Transcript:
-                    </div>
-                    {f.transcript ? (
-                      <Paragraph
-                        style={{ margin: 0, fontSize: 12, color: 'rgba(148,163,184,0.95)' }}
-                        ellipsis={{ rows: 4, expandable: true, symbol: 'More' }}
-                        copyable={{ text: f.transcript }}
-                      >
-                        {f.transcript}
-                      </Paragraph>
-                    ) : (
-                      <div className="muted" style={{ fontSize: 12 }}>
-                        {status.openAiConfigured ? 'Pending…' : 'OpenAI not configured'}
-                      </div>
-                    )}
+                    <div className="muted" style={{ fontSize: 12, marginBottom: 4 }}>Evaluation:</div>
+                    {(() => {
+                      const a = f.analysis || null
+                      const r = a?.results || null
+                      if (!status.openAiConfigured) return <div className="muted" style={{ fontSize: 12 }}>OpenAI not configured</div>
+                      if (!a) return <div className="muted" style={{ fontSize: 12 }}>Pending…</div>
+                      if (a.status === 'pending') return <div className="muted" style={{ fontSize: 12 }}>{a.message || 'Pending…'}</div>
+                      if (a.status === 'error') return <div className="muted" style={{ fontSize: 12 }}>Error: {a.message || 'Evaluation failed'}</div>
+                      if (a.status !== 'done' || !r) return <div className="muted" style={{ fontSize: 12 }}>{a.message || 'Pending…'}</div>
+
+                      const per = Array.isArray(r.perQuestion) ? r.perQuestion : []
+                      return (
+                        <div style={{ fontSize: 12, color: 'rgba(148,163,184,0.95)' }}>
+                          <div style={{ marginBottom: 6 }}>
+                            <Tag color="geekblue">Overall: {Number.isFinite(Number(r.overallPercent)) ? Math.round(Number(r.overallPercent)) : '—'}%</Tag>
+                            {r.notes ? <span className="muted" style={{ marginLeft: 8 }}>{String(r.notes)}</span> : null}
+                          </div>
+                          {per.length ? (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                              {per.map((pq) => (
+                                <div key={`${pq.index}-${pq.percent}`} style={{ padding: '6px 8px', borderRadius: 8, border: '1px solid rgba(148,163,184,0.18)', background: 'rgba(15,23,42,0.35)' }}>
+                                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10 }}>
+                                    <div style={{ fontWeight: 700 }}>Q{pq.index} — {String(pq.question || '').slice(0, 120)}</div>
+                                    <Tag color={Number(pq.percent) >= 75 ? 'green' : (Number(pq.percent) >= 50 ? 'gold' : 'red')}>{Math.round(Number(pq.percent) || 0)}%</Tag>
+                                  </div>
+                                  {pq.feedback ? <div className="muted" style={{ marginTop: 4 }}>{String(pq.feedback)}</div> : null}
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="muted" style={{ fontSize: 12 }}>No per-question results.</div>
+                          )}
+                        </div>
+                      )
+                    })()}
                   </div>
                 </div>
               ))
