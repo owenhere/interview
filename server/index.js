@@ -34,6 +34,8 @@ const UPLOAD_DIR = path.join(__dirname, 'uploads');
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 const CHUNK_DIR = path.join(__dirname, 'chunks');
 if (!fs.existsSync(CHUNK_DIR)) fs.mkdirSync(CHUNK_DIR, { recursive: true });
+const THUMB_DIR = path.join(UPLOAD_DIR, 'thumbs')
+if (!fs.existsSync(THUMB_DIR)) fs.mkdirSync(THUMB_DIR, { recursive: true })
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, UPLOAD_DIR),
@@ -270,6 +272,32 @@ async function tryAssembleToMp4WithFfmpeg({ chunkPaths, outPathMp4 }) {
   } finally {
     try { fs.unlinkSync(listPath) } catch (e) {}
   }
+}
+
+async function generateThumbnail({ inputPath, thumbAbsPath }) {
+  // Best-effort thumbnail generation (first frame around 1s).
+  // If ffmpeg is not available, just skip.
+  if (!isFfmpegLikelyAvailable()) return { ok: false, skipped: true }
+  try {
+    await runFfmpeg([
+      '-y',
+      '-ss', '00:00:01',
+      '-i', inputPath,
+      '-frames:v', '1',
+      '-vf', 'scale=640:-1',
+      '-q:v', '4',
+      thumbAbsPath,
+    ])
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: e?.message || String(e) }
+  }
+}
+
+function makeThumbName(fileName) {
+  const safe = String(fileName || 'video').replace(/[^a-z0-9.\-_]/gi, '_')
+  // Replace extension with .jpg
+  return safe.replace(/\.[^.]+$/, '') + '.jpg'
 }
 
 // Interview session templates created by admin (e.g. "C#", "React", etc.)
@@ -511,6 +539,20 @@ app.post(withBackendPrefix('/upload-answer'), upload.single('video'), (req, res)
     if (metadata.name) session.name = metadata.name
     fs.writeFileSync(RECORDS_FILE, JSON.stringify(records, null, 2))
 
+    // Best-effort thumbnail generation (async; does not block response).
+    ;(async () => {
+      try {
+        const inputPath = path.join(UPLOAD_DIR, file.filename)
+        const thumbName = makeThumbName(file.filename)
+        const thumbAbsPath = path.join(THUMB_DIR, thumbName)
+        const r = await generateThumbnail({ inputPath, thumbAbsPath })
+        if (r && r.ok) {
+          fileEntry.thumbnailPath = `/uploads/thumbs/${thumbName}`
+          fs.writeFileSync(RECORDS_FILE, JSON.stringify(records, null, 2))
+        }
+      } catch (e) {}
+    })()
+
     // Cleanup: if chunk files exist for this session, delete them.
     // We keep chunk uploads as a resilience mechanism, but prefer the final single file for playback reliability.
     try {
@@ -678,6 +720,19 @@ async function assembleChunks(sessionId, name, interviewId, candidate) {
   if (name) session.name = name
   fs.writeFileSync(RECORDS_FILE, JSON.stringify(records, null, 2))
 
+  // Best-effort thumbnail generation (async).
+  ;(async () => {
+    try {
+      const thumbName = makeThumbName(outName)
+      const thumbAbsPath = path.join(THUMB_DIR, thumbName)
+      const r = await generateThumbnail({ inputPath: outPath, thumbAbsPath })
+      if (r && r.ok) {
+        fileEntry.thumbnailPath = `/uploads/thumbs/${thumbName}`
+        fs.writeFileSync(RECORDS_FILE, JSON.stringify(records, null, 2))
+      }
+    } catch (e) {}
+  })()
+
   // remove chunk files
   for (const f of files) {
     try { fs.unlinkSync(path.join(CHUNK_DIR, f)) } catch (e) {}
@@ -749,13 +804,14 @@ app.get(withBackendPrefix('/upload-complete-beacon'), (req, res) => {
   const country = req.query.country
   const phone = req.query.phone
   const source = req.query.source
+  const force = String(req.query.force || '').toLowerCase() === 'true' || String(req.query.force || '') === '1'
   if (!sessionId) return res.status(400).json({ error: 'sessionId required' })
 
   // Guard: don't assemble while recording is active. Just accept the beacon and no-op.
   try {
     const records = readRecords()
     const session = findSession(records, sessionId)
-    if (session?.metadata?.recordingActive === true) {
+    if (!force && session?.metadata?.recordingActive === true) {
       return res.status(202).json({ ok: true, message: 'Recording active; assemble skipped' })
     }
   } catch (e) {}
@@ -776,14 +832,14 @@ app.get(withBackendPrefix('/upload-complete-beacon'), (req, res) => {
 
 // Accept POST beacons too (navigator.sendBeacon will POST a small payload)
 app.post(withBackendPrefix('/upload-complete-beacon'), express.json(), (req, res) => {
-  const { sessionId, name, interviewId, email, country, phone, source } = req.body || {}
+  const { sessionId, name, interviewId, email, country, phone, source, force } = req.body || {}
   if (!sessionId) return res.status(400).json({ error: 'sessionId required' })
 
   // Guard: don't assemble while recording is active. Just accept the beacon and no-op.
   try {
     const records = readRecords()
     const session = findSession(records, sessionId)
-    if (session?.metadata?.recordingActive === true) {
+    if (!force && session?.metadata?.recordingActive === true) {
       return res.status(202).json({ ok: true, message: 'Recording active; assemble skipped' })
     }
   } catch (e) {}
@@ -974,17 +1030,54 @@ app.get(withBackendPrefix('/admin/recordings'), (req, res) => {
     return res.status(401).json({ error: 'Invalid token' })
   }
   const records = JSON.parse(fs.readFileSync(RECORDS_FILE, 'utf8') || '[]')
+
+  // Pagination (optional): /admin/recordings?offset=0&limit=10&summary=1
+  const offset = Math.max(0, Number.parseInt(req.query.offset, 10) || 0)
+  const limitRaw = Number.parseInt(req.query.limit, 10)
+  const limit = (Number.isFinite(limitRaw) && limitRaw > 0) ? Math.min(limitRaw, 200) : null
+  const summary = String(req.query.summary || '') === '1' || String(req.query.summary || '').toLowerCase() === 'true'
+
+  // Sort newest-first for stable pagination.
+  const sorted = [...records].sort((a, b) => {
+    const at = new Date(a?.lastUploadedAt || a?.createdAt || 0).getTime()
+    const bt = new Date(b?.lastUploadedAt || b?.createdAt || 0).getTime()
+    if (bt !== at) return bt - at
+    return String(b?.id || '').localeCompare(String(a?.id || ''))
+  })
+
+  const total = sorted.length
+  const page = (limit == null) ? sorted : sorted.slice(offset, offset + limit)
   // For local files, return a URL that works behind nginx `/backend/` proxy.
   // We serve uploads at both `/uploads` and `/backend/uploads` on the node server.
   const uploadsPrefix = '/backend'
-  const list = records.map(s => ({
+  const list = page.map(s => ({
     id: s.id,
     sessionId: s.sessionId || s.id,
     name: s.name || s.metadata?.name || 'Unknown',
     metadata: s.metadata || {},
     createdAt: s.createdAt || s.uploadedAt,
     lastUploadedAt: s.lastUploadedAt,
-    files: (s.files || []).map(f => ({
+    filesCount: Array.isArray(s.files) ? s.files.length : 0,
+    previewUrl: (() => {
+      try {
+        const files = Array.isArray(s.files) ? s.files : []
+        const last = files.length ? files[files.length - 1] : null
+        if (!last) return ''
+        // Prefer remote URL if present, else local file URL
+        if (last.remoteUrl) return String(last.remoteUrl)
+        if (last.path) return toAbsoluteUrl(req, `${uploadsPrefix}${last.path}`)
+      } catch (e) {}
+      return ''
+    })(),
+    thumbnailUrl: (() => {
+      try {
+        const files = Array.isArray(s.files) ? s.files : []
+        const last = files.length ? files[files.length - 1] : null
+        if (last && last.thumbnailPath) return toAbsoluteUrl(req, `${uploadsPrefix}${last.thumbnailPath}`)
+      } catch (e) {}
+      return ''
+    })(),
+    files: summary ? [] : (s.files || []).map(f => ({
       id: f.id,
       filename: f.filename,
       question: f.question,
@@ -993,12 +1086,44 @@ app.get(withBackendPrefix('/admin/recordings'), (req, res) => {
       // Always return an absolute URL so the admin <video> element loads from the backend
       // even when the frontend is served from a different origin (e.g. preview server).
       url: f.remoteUrl || toAbsoluteUrl(req, `${uploadsPrefix}${f.path}`),
+      thumbnailUrl: f.thumbnailPath ? toAbsoluteUrl(req, `${uploadsPrefix}${f.thumbnailPath}`) : '',
       transcript: f.transcript,
       analysis: f.analysis,
     })),
     conversation: s.conversation || []
   }))
-  return res.json({ recordings: list })
+  return res.json({ recordings: list, total, offset, limit: limit ?? total })
+})
+
+// Fetch one recording session with full files (protected)
+app.get(withBackendPrefix('/admin/recordings/:id'), (req, res) => {
+  if (!requireAdmin(req, res)) return
+  const id = req.params.id
+  const records = readRecords()
+  const session = findSession(records, id)
+  if (!session) return res.status(404).json({ error: 'Not found' })
+  const uploadsPrefix = '/backend'
+  const out = {
+    id: session.id,
+    sessionId: session.sessionId || session.id,
+    name: session.name || session.metadata?.name || 'Unknown',
+    metadata: session.metadata || {},
+    createdAt: session.createdAt || session.uploadedAt,
+    lastUploadedAt: session.lastUploadedAt,
+    files: (session.files || []).map(f => ({
+      id: f.id,
+      filename: f.filename,
+      question: f.question,
+      index: f.index,
+      uploadedAt: f.uploadedAt,
+      url: f.remoteUrl || toAbsoluteUrl(req, `${uploadsPrefix}${f.path}`),
+      thumbnailUrl: f.thumbnailPath ? toAbsoluteUrl(req, `${uploadsPrefix}${f.thumbnailPath}`) : '',
+      transcript: f.transcript,
+      analysis: f.analysis,
+    })),
+    conversation: session.conversation || []
+  }
+  return res.json({ ok: true, recording: out })
 })
 
 // Delete a session and associated files (protected)

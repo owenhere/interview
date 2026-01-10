@@ -60,6 +60,7 @@ export default function Interview({ name, email, country, phone, interviewId, st
   const [voiceLevel, setVoiceLevel] = useState(0)
   const mediaRef = useRef(null)
   const recorderRef = useRef(null)
+  const stopReasonRef = useRef(null) // 'user' | 'timeout' | null
   const chunksRef = useRef([])
   const sessionIdRef = useRef(null)
   const uploadPromiseRef = useRef(null)
@@ -130,6 +131,7 @@ export default function Interview({ name, email, country, phone, interviewId, st
     if (autoStopTriggeredRef.current) return
     autoStopTriggeredRef.current = true
     // Auto-end the interview when time runs out (same as clicking "Finish Interview").
+    stopReasonRef.current = 'timeout'
     stopRecording().catch(() => {})
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [elapsedSeconds, recording])
@@ -139,7 +141,7 @@ export default function Interview({ name, email, country, phone, interviewId, st
   }, [name])
 
   useEffect(() => {
-    const tryFinalizeViaBeacon = () => {
+    const tryFinalizeOnHide = () => {
       try {
         // If we haven't produced any chunks yet, finalizing will fail ("no chunks found").
         // This can happen if the tab closes before the first MediaRecorder timeslice fires.
@@ -163,11 +165,35 @@ export default function Interview({ name, email, country, phone, interviewId, st
         }
       } catch (e) { console.warn('beacon finalize failed', e) }
     }
-    const onVisibility = () => { if (document.visibilityState === 'hidden') tryFinalizeViaBeacon() }
-    window.addEventListener('beforeunload', tryFinalizeViaBeacon)
+
+    const tryFinalizeOnUnload = () => {
+      try {
+        if (!hasChunkRef.current) return
+        // If we're already uploading or completed, don't re-finalize.
+        if (uploadingRef.current) return
+        if (completedRef.current) return
+
+        // On unload we want best-effort finalization of chunks already uploaded.
+        // Use `force:true` so the server assembles even if recordingActive is still true.
+        const url = `${API_BASE}/upload-complete-beacon`
+        const payload = JSON.stringify({ sessionId: sessionIdRef.current, name, email, country, phone, interviewId, source: refSource, force: true })
+        if (navigator.sendBeacon) {
+          const blob = new Blob([payload], { type: 'application/json' })
+          navigator.sendBeacon(url, blob)
+        } else {
+          const xhr = new XMLHttpRequest()
+          xhr.open('POST', url, false)
+          xhr.setRequestHeader('Content-Type', 'application/json')
+          xhr.send(payload)
+        }
+      } catch (e) { /* ignore */ }
+    }
+
+    const onVisibility = () => { if (document.visibilityState === 'hidden') tryFinalizeOnHide() }
+    window.addEventListener('beforeunload', tryFinalizeOnUnload)
     document.addEventListener('visibilitychange', onVisibility)
     return () => {
-      window.removeEventListener('beforeunload', tryFinalizeViaBeacon)
+      window.removeEventListener('beforeunload', tryFinalizeOnUnload)
       document.removeEventListener('visibilitychange', onVisibility)
     }
   }, [name])
@@ -253,7 +279,11 @@ export default function Interview({ name, email, country, phone, interviewId, st
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
       setMediaStream(stream)
-      if (mediaRef.current) mediaRef.current.srcObject = stream
+      if (mediaRef.current) {
+        mediaRef.current.srcObject = stream
+        // Some browsers require an explicit play() even with autoPlay.
+        try { await mediaRef.current.play() } catch (e) {}
+      }
       return stream
     } catch (err) {
       console.warn('Could not access camera/microphone', err)
@@ -264,8 +294,16 @@ export default function Interview({ name, email, country, phone, interviewId, st
   const startRecording = async () => {
     // Reset auto-stop guard for a new recording.
     autoStopTriggeredRef.current = false
+    stopReasonRef.current = null
+    setThankYouOpen(false)
     let stream = mediaRef.current?.srcObject || mediaStream
     if (!stream) stream = await startCamera()
+    if (!stream) {
+      // Most commonly: user denied permissions or browser blocked prompt.
+      setUploadError('Please allow camera & microphone access, then try again.')
+      setRecording(false)
+      return
+    }
     // best-effort voice detection (does not block recording)
     if (stream) startVoiceDetection(stream)
 
@@ -279,7 +317,15 @@ export default function Interview({ name, email, country, phone, interviewId, st
       videoBitsPerSecond: 800_000,
       audioBitsPerSecond: 64_000,
     }
-    const mr = new MediaRecorder(stream || mediaRef.current.srcObject || mediaStream, options)
+    let mr
+    try {
+      mr = new MediaRecorder(stream || mediaRef.current.srcObject || mediaStream, options)
+    } catch (e) {
+      console.warn('Could not start MediaRecorder', e)
+      setUploadError('Could not start recording in this browser/device. Please try another browser.')
+      setRecording(false)
+      return
+    }
     recorderRef.current = mr
     let chunkIndex = 0
     setLastRecording(null)
@@ -319,6 +365,13 @@ export default function Interview({ name, email, country, phone, interviewId, st
     mr.onstop = () => {
       uploadPromiseRef.current = (async () => {
         try {
+          // If recording stopped without explicit "Finish" click or a timeout,
+          // do not upload and do not show success.
+          if (!stopReasonRef.current) {
+            setUploadError('Recording stopped unexpectedly. Please try again.')
+            return
+          }
+
           setUploading(true)
           setUploadError('')
           let uploadSucceeded = false
@@ -357,15 +410,31 @@ export default function Interview({ name, email, country, phone, interviewId, st
         } catch (e) { console.warn('finalize failed', e) }
         chunksRef.current = []
         setUploading(false)
+        stopReasonRef.current = null
       })()
     }
-    mr.onerror = (ev) => console.error('Recorder error', ev)
+    mr.onerror = (ev) => {
+      console.error('Recorder error', ev)
+      // Mark as unexpected stop so we don't upload in onstop.
+      stopReasonRef.current = null
+      setUploadError('Recording error occurred. Please try again.')
+      try { if (mr && mr.state !== 'inactive') mr.stop() } catch (e) {}
+      setRecording(false)
+    }
     // Smaller timeslice => smaller chunks (helps avoid 413 from proxies with small body limits).
-    mr.start(2000)
-    setRecording(true)
+    try {
+      mr.start(2000)
+      setRecording(true)
+    } catch (e) {
+      console.warn('MediaRecorder start failed', e)
+      setUploadError('Could not start recording. Please check permissions and try again.')
+      setRecording(false)
+    }
   }
 
   const stopRecording = async () => {
+    // Mark explicit user stop (unless already timeout).
+    stopReasonRef.current = stopReasonRef.current || 'user'
     stopVoiceDetection()
     if (recorderRef.current && recorderRef.current.state !== 'inactive') recorderRef.current.stop()
     setRecording(false)

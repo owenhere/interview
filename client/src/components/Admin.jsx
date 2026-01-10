@@ -3,7 +3,8 @@ import { Card, Button, Input, List, Typography, Space, Popconfirm, message, Draw
 import { LockOutlined, ArrowLeftOutlined } from '@ant-design/icons'
 import {
   adminLogin,
-  fetchRecordings as apiFetchRecordings,
+  fetchRecordingsPage as apiFetchRecordingsPage,
+  fetchRecordingDetails as apiFetchRecordingDetails,
   deleteRecording as apiDeleteRecording,
   deleteRecordingFile as apiDeleteRecordingFile,
   fetchStatus,
@@ -21,12 +22,17 @@ export default function Admin() {
   const [token, setToken] = useState('')
   const [recordings, setRecordings] = useState([])
   const [loading, setLoading] = useState(false)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [hasMore, setHasMore] = useState(true)
+  const [totalRecordings, setTotalRecordings] = useState(null)
   const [interviews, setInterviews] = useState([])
   const [newStack, setNewStack] = useState('C#')
   const [creating, setCreating] = useState(false)
   const [status, setStatus] = useState({ openAiConfigured: null })
   const [selectedId, setSelectedId] = useState(null)
   const [drawerOpen, setDrawerOpen] = useState(false)
+  const [selectedSession, setSelectedSession] = useState(null)
+  const [detailsLoading, setDetailsLoading] = useState(false)
   const [linksModalOpen, setLinksModalOpen] = useState(false)
   // manual transcript removed - server will auto-transcribe uploaded recordings
 
@@ -36,7 +42,7 @@ export default function Admin() {
       const saved = localStorage.getItem(ADMIN_TOKEN_KEY)
       if (saved) {
         setToken(saved)
-        fetchRecordings(saved)
+        loadInitial(saved)
         fetchInterviews(saved)
       }
     } catch (e) {
@@ -66,7 +72,7 @@ export default function Admin() {
       if (data.token) {
         setToken(data.token)
         try { localStorage.setItem(ADMIN_TOKEN_KEY, data.token) } catch (e) {}
-        await fetchRecordings(data.token)
+        await loadInitial(data.token)
         await fetchInterviews(data.token)
         message.success('Logged in as admin')
       } else {
@@ -83,6 +89,8 @@ export default function Admin() {
   const logout = () => {
     setToken('')
     setRecordings([])
+    setHasMore(true)
+    setTotalRecordings(null)
     setInterviews([])
     try { localStorage.removeItem(ADMIN_TOKEN_KEY) } catch (e) {}
     message.success('Logged out')
@@ -163,11 +171,14 @@ export default function Admin() {
     }
   }
 
-  const fetchRecordings = async (t) => {
+  const loadInitial = async (t) => {
     try {
       setLoading(true)
-      const data = await apiFetchRecordings(t)
-      setRecordings(data.recordings || [])
+      const data = await apiFetchRecordingsPage({ offset: 0, limit: 10, summary: true }, t)
+      const recs = data.recordings || []
+      setRecordings(recs)
+      setTotalRecordings(typeof data.total === 'number' ? data.total : null)
+      setHasMore(typeof data.total === 'number' ? recs.length < data.total : (recs.length >= 10))
     } catch (err) {
       console.error(err)
       if (err && err.status === 401) {
@@ -181,12 +192,37 @@ export default function Admin() {
     }
   }
 
+  const loadMore = async () => {
+    if (!token) return
+    if (!hasMore) return
+    if (loadingMore || loading) return
+    try {
+      setLoadingMore(true)
+      const offset = recordings.length
+      const data = await apiFetchRecordingsPage({ offset, limit: 5, summary: true }, token)
+      const next = data.recordings || []
+      const merged = [...recordings, ...next]
+      setRecordings(merged)
+      const total = typeof data.total === 'number' ? data.total : totalRecordings
+      if (typeof total === 'number') {
+        setTotalRecordings(total)
+        setHasMore(merged.length < total)
+      } else {
+        setHasMore(next.length > 0)
+      }
+    } catch (err) {
+      console.error(err)
+    } finally {
+      setLoadingMore(false)
+    }
+  }
+
   // assessments are run automatically on the server after transcription
 
   const deleteSession = async (id) => {
     try {
       const data = await apiDeleteRecording(id, token)
-      if (data.ok) fetchRecordings(token)
+      if (data.ok) loadInitial(token)
       else alert('Delete failed')
     } catch (err) {
       console.error(err)
@@ -204,7 +240,11 @@ export default function Admin() {
       const data = await apiDeleteRecordingFile(sessionId, fileId, token)
       if (data.ok) {
         message.success('Recording deleted')
-        await fetchRecordings(token)
+        await loadInitial(token)
+        try {
+          const d = await apiFetchRecordingDetails(sessionId, token)
+          setSelectedSession(d.recording || null)
+        } catch (e) {}
       } else {
         message.error('Delete failed')
       }
@@ -219,9 +259,22 @@ export default function Admin() {
     }
   }
 
-  const openDetails = (rec) => {
-    setSelectedId(rec?.id)
+  const openDetails = async (rec) => {
+    const sid = rec?.id
+    if (!sid) return
+    setSelectedId(sid)
     setDrawerOpen(true)
+    setSelectedSession(null)
+    setDetailsLoading(true)
+    try {
+      const data = await apiFetchRecordingDetails(sid, token)
+      setSelectedSession(data.recording || null)
+    } catch (e) {
+      console.error(e)
+      message.error('Could not load recording details')
+    } finally {
+      setDetailsLoading(false)
+    }
   }
 
   const downloadVideo = async (url, filename) => {
@@ -244,7 +297,7 @@ export default function Admin() {
     }
   }
 
-  const selected = selectedId ? recordings.find(r => r.id === selectedId) : null
+  const selected = selectedSession || (selectedId ? recordings.find(r => r.id === selectedId) : null)
 
   const sortedInterviews = useMemo(() => {
     const arr = Array.isArray(interviews) ? [...interviews] : []
@@ -257,33 +310,46 @@ export default function Admin() {
     return sortedInterviews.slice(0, 3)
   }, [sortedInterviews])
 
+  // Infinite scroll: load 5 more sessions when nearing the bottom of the page.
   useEffect(() => {
-    // "Live" update: while drawer is open and analysis isn't ready yet, poll recordings.
+    if (!token) return
+    const onScroll = () => {
+      if (!hasMore || loadingMore || loading) return
+      const scrollPos = window.innerHeight + window.scrollY
+      const threshold = document.documentElement.scrollHeight - 500
+      if (scrollPos >= threshold) loadMore()
+    }
+    window.addEventListener('scroll', onScroll, { passive: true })
+    return () => window.removeEventListener('scroll', onScroll)
+  }, [token, hasMore, loadingMore, loading, recordings.length])
+
+  useEffect(() => {
+    // While drawer is open and transcript isn't ready yet, poll the session details (not the whole list).
     if (!drawerOpen || !token || !selectedId) return
-  const needsUpdate = (rec) => {
-      if (!rec) return false
+
+    const needsUpdate = () => {
+      const rec = selectedSession
+      if (!rec) return true
       const ai = rec.files?.[0]?.analysis?.status
-      // If server explicitly says pending, keep polling
       if (ai === 'pending') return true
-    // If we don't have transcript yet and we don't know OpenAI status, poll for a bit.
-    if (!rec.files?.[0]?.transcript && status.openAiConfigured === null) return true
-    // If OpenAI is configured and transcript missing, poll (processing)
-    if (!rec.files?.[0]?.transcript && status.openAiConfigured === true) return true
+      if (!rec.files?.[0]?.transcript && status.openAiConfigured === true) return true
       return false
     }
 
-    if (!needsUpdate(selected)) return
+    if (!needsUpdate()) return
 
     let ticks = 0
-    const interval = setInterval(() => {
+    const interval = setInterval(async () => {
       ticks += 1
-      // stop after ~2 minutes to avoid infinite polling
       if (ticks > 30) return clearInterval(interval)
-      fetchRecordings(token)
+      try {
+        const data = await apiFetchRecordingDetails(selectedId, token)
+        setSelectedSession(data.recording || null)
+      } catch (e) {}
     }, 4000)
 
     return () => clearInterval(interval)
-  }, [drawerOpen, token, selectedId, status.openAiConfigured, selected])
+  }, [drawerOpen, token, selectedId, status.openAiConfigured, selectedSession])
 
   if (!token) return (
     <div className="container"><Card className="card" style={{ maxWidth: 520 }}>
@@ -318,10 +384,12 @@ export default function Admin() {
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div>
             <h2 style={{ marginBottom: 0 }}>Recordings</h2>
-            <Text className="muted">{recordings.length} items</Text>
+            <Text className="muted">
+              {typeof totalRecordings === 'number' ? `${recordings.length} / ${totalRecordings}` : `${recordings.length} items`}
+            </Text>
           </div>
           <Space>
-            <Button type="primary" onClick={() => fetchRecordings(token)} loading={loading}>Refresh</Button>
+            <Button type="primary" onClick={() => loadInitial(token)} loading={loading}>Refresh</Button>
             <Button danger onClick={logout}>Logout</Button>
           </Space>
         </div>
@@ -435,6 +503,26 @@ export default function Admin() {
       <List grid={{ gutter: 16, column: 3 }} style={{ marginTop: 12 }} dataSource={recordings} renderItem={r => (
         <List.Item>
           <Card className="rec-card" hoverable onClick={() => openDetails(r)}>
+            {r.thumbnailUrl ? (
+              <div style={{ marginBottom: 10 }}>
+                <img
+                  src={r.thumbnailUrl}
+                  alt="Recording preview"
+                  style={{ width: '100%', borderRadius: 10, border: '1px solid rgba(148,163,184,0.18)', background: '#000', maxHeight: 160, objectFit: 'cover' }}
+                  loading="lazy"
+                />
+              </div>
+            ) : (r.previewUrl ? (
+              <div style={{ marginBottom: 10 }}>
+                <video
+                  src={r.previewUrl}
+                  preload="metadata"
+                  muted
+                  playsInline
+                  style={{ width: '100%', borderRadius: 10, border: '1px solid rgba(148,163,184,0.18)', background: '#000', maxHeight: 160, objectFit: 'cover' }}
+                />
+              </div>
+            ) : null)}
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
               <div>
                 <div style={{ fontWeight: 700 }}>{r.name || r.metadata?.name || 'unknown'}</div>
@@ -448,13 +536,10 @@ export default function Admin() {
                 </Space>
               </div>
             </div>
-            <div style={{ marginTop: 8 }}>
-              {(r.files || []).map(f => (
-                <div key={f.id} style={{ marginBottom: 8 }}>
-                  <div style={{ fontSize: 13, color: '#eee', marginBottom: 6 }}>{f.question || ''}</div>
-                  <video controls src={f.url} style={{ width: '100%', borderRadius: 8 }} />
-                </div>
-              ))}
+            <div className="muted" style={{ marginTop: 10, fontSize: 12 }}>
+              {typeof r.filesCount === 'number'
+                ? `${r.filesCount} recording${r.filesCount === 1 ? '' : 's'}`
+                : `${(r.files || []).length} recording${(r.files || []).length === 1 ? '' : 's'}`}
             </div>
             <div style={{ marginTop: 10 }} className="muted">
               Click to open details
@@ -462,6 +547,8 @@ export default function Admin() {
           </Card>
         </List.Item>
       )} />
+
+      {loadingMore ? <div className="muted" style={{ marginTop: 14 }}>Loading more…</div> : null}
 
       <Drawer
         open={drawerOpen}
@@ -474,7 +561,9 @@ export default function Admin() {
           content: { background: '#0b1627' },
         }}
       >
-        {!selected ? null : (
+        {detailsLoading ? (
+          <div className="muted">Loading details…</div>
+        ) : (!selected ? null : (
           <div>
             <div className="muted" style={{ marginBottom: 10 }}>
               {selected.metadata?.stack ? <Tag color="blue">{selected.metadata.stack}</Tag> : null}
@@ -539,7 +628,7 @@ export default function Admin() {
               ))
             )}
           </div>
-        )}
+        ))}
       </Drawer>
     </Card></div>
   )

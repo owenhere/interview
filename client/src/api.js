@@ -106,6 +106,22 @@ export async function fetchRecordings(token) {
   });
 }
 
+export async function fetchRecordingsPage({ offset = 0, limit = 10, summary = true } = {}, token) {
+  const qs = new URLSearchParams()
+  if (typeof offset === 'number') qs.set('offset', String(offset))
+  if (typeof limit === 'number') qs.set('limit', String(limit))
+  if (summary) qs.set('summary', '1')
+  return request(`/admin/recordings?${qs.toString()}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
+export async function fetchRecordingDetails(sessionId, token) {
+  return request(`/admin/recordings/${encodeURIComponent(sessionId)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
 export async function deleteRecording(id, token) {
   return request(`/admin/recordings/${encodeURIComponent(id)}`, {
     method: 'DELETE',
