@@ -7,7 +7,10 @@ Overview
 - Backend: Node + Express (`/server`) — generates questions using OpenAI and accepts video uploads.
 
 Setup
-1. Copy your OpenAI key into `server/.env` as `OPENAI_API_KEY`.
+1. Configure the backend environment (PostgreSQL + OpenAI):
+   - Copy `server/env.example` to `server/.env`
+   - Set `DATABASE_URL` (PostgreSQL connection string)
+   - Set `OPENAI_API_KEY` (for question generation + evaluation)
 2. From the repo root, install dependencies for each package:
 
 ```powershell
@@ -41,4 +44,12 @@ Notes
 
 ```nginx
 client_max_body_size 50m;
+```
+
+Migration (records.json -> PostgreSQL)
+- If you have existing data in `server/records.json`, run:
+
+```powershell
+cd server
+npm run migrate:records-json
 ```

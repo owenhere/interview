@@ -5,6 +5,8 @@ const fs = require('fs');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process')
 const os = require('os')
+const db = require('./db')
+const { migrateRecordsJsonToPostgres } = require('./migrate')
 
 // Resolve a fetch implementation:
 // 1) prefer global fetch (Node 18+),
@@ -300,14 +302,14 @@ async function gradeInterviewAnswers({ questions, transcriptText, stack }) {
   }
 }
 
-async function analyzeAndGradeRecording({ absFilePath, fileEntry, session }) {
+async function analyzeAndGradeRecording({ absFilePath, fileEntry, questions, stack }) {
   try {
     if (!OPENAI_KEY) {
       setFileAnalysisState(fileEntry, { status: 'unavailable', message: 'OpenAI not configured (set OPENAI_API_KEY).' })
       return
     }
-    const questions = normalizeQuestionsArray(session?.metadata?.questions || session?.questions || [])
-    if (!questions.length) {
+    const qs = normalizeQuestionsArray(questions || [])
+    if (!qs.length) {
       setFileAnalysisState(fileEntry, { status: 'error', message: 'No questions were provided by the client; cannot grade per-question answers.' })
       return
     }
@@ -342,7 +344,7 @@ async function analyzeAndGradeRecording({ absFilePath, fileEntry, session }) {
         fileEntry.analysis.updatedAt = new Date().toISOString()
         fileEntry.analysis.results = {
           overallPercent: 0,
-          perQuestion: questions.map((q, i) => ({ index: i + 1, question: q, percent: 0, feedback: 'No clear answer detected (audio may be silent/unavailable).' })),
+          perQuestion: qs.map((q, i) => ({ index: i + 1, question: q, percent: 0, feedback: 'No clear answer detected (audio may be silent/unavailable).' })),
           notes: msg,
         }
         return
@@ -352,7 +354,7 @@ async function analyzeAndGradeRecording({ absFilePath, fileEntry, session }) {
       return
     }
 
-    const graded = await gradeInterviewAnswers({ questions, transcriptText: tr.text, stack: session?.metadata?.stack })
+    const graded = await gradeInterviewAnswers({ questions: qs, transcriptText: tr.text, stack })
     if (graded.error) {
       setFileAnalysisState(fileEntry, { status: 'error', message: graded.error })
       return
@@ -388,9 +390,7 @@ app.get(withBackendPrefix('/admin/status'), (req, res) => {
   return res.json({ usingDefaultAdminPassword: (ADMIN_PASSWORD === 'adminpass'), hasEnvAdminPassword: !!process.env.ADMIN_PASSWORD })
 })
 
-// Simple records store (append to this file)
-const RECORDS_FILE = path.join(__dirname, 'records.json');
-if (!fs.existsSync(RECORDS_FILE)) fs.writeFileSync(RECORDS_FILE, JSON.stringify([]));
+// Records store: PostgreSQL (see server/db.js). Records are no longer persisted to records.json.
 
 // Optional Cloudinary setup (set CLOUDINARY_URL or CLOUDINARY_* env vars)
 let cloudinaryClient = null;
@@ -565,17 +565,7 @@ function writeJsonArray(filePath, arr) {
   fs.writeFileSync(filePath, JSON.stringify(arr || [], null, 2))
 }
 
-function readRecords() {
-  try {
-    return JSON.parse(fs.readFileSync(RECORDS_FILE, 'utf8') || '[]')
-  } catch (e) {
-    return []
-  }
-}
-
-function findSession(records, sessionId) {
-  return (records || []).find(r => r && (r.id === sessionId || r.sessionId === sessionId)) || null
-}
+// readRecords/findSession removed (Postgres-backed storage)
 
 function requireAdmin(req, res) {
   const auth = req.headers.authorization || ''
@@ -717,7 +707,7 @@ app.post(withBackendPrefix('/generate-questions'), async (req, res) => {
   }
 });
 
-app.post(withBackendPrefix('/upload-answer'), upload.single('video'), (req, res) => {
+app.post(withBackendPrefix('/upload-answer'), upload.single('video'), async (req, res) => {
   const file = req.file;
   const metadata = req.body.metadata ? (() => { try { return JSON.parse(req.body.metadata) } catch { return {} } })() : {};
   if (!file) return res.status(400).json({ error: 'No file uploaded' });
@@ -732,40 +722,30 @@ app.post(withBackendPrefix('/upload-answer'), upload.single('video'), (req, res)
 
   // Group uploads by sessionId so admin sees per-user sessions instead of per-chunk entries
   const sessionId = metadata.sessionId || `session-${Date.now()}`
-  const records = JSON.parse(fs.readFileSync(RECORDS_FILE, 'utf8') || '[]');
-  let session = records.find(r => r.id === sessionId || r.sessionId === sessionId)
-  if (!session) {
-    session = {
-      id: sessionId,
-      sessionId,
-      name: metadata.name || 'Unknown',
-      createdAt: new Date().toISOString(),
-      files: [],
-      metadata: {}
-    }
-    records.push(session)
-  }
-  session.metadata = session.metadata || {}
-  // Persist candidate info
-  if (metadata.email) session.metadata.email = String(metadata.email).trim()
-  if (metadata.country) session.metadata.country = String(metadata.country).trim()
-  if (metadata.phone) session.metadata.phone = String(metadata.phone).trim()
-  if (metadata.source) session.metadata.source = String(metadata.source).trim()
-  // Persist questions so we can grade per-question answers after upload.
-  if (Array.isArray(metadata.questions)) {
-    const qs = normalizeQuestionsArray(metadata.questions)
-    if (qs.length) session.metadata.questions = qs
-  }
+
+  const questions = Array.isArray(metadata.questions) ? normalizeQuestionsArray(metadata.questions) : []
   // Attach interviewId/stack to session for admin filtering & correct labeling
+  let stackFromInterview = ''
   if (metadata.interviewId) {
-    session.metadata.interviewId = metadata.interviewId
-    const interviews = readJsonArray(INTERVIEWS_FILE)
-    const interview = interviews.find(i => i.id === metadata.interviewId)
-    if (interview && interview.stack) session.metadata.stack = interview.stack
+    try {
+      const interviews = readJsonArray(INTERVIEWS_FILE)
+      const interview = interviews.find(i => i.id === metadata.interviewId)
+      if (interview && interview.stack) stackFromInterview = interview.stack
+    } catch (e) {}
   }
-  // Mark this session as finalized (prevents background chunk assembler from running mid-session)
-  session.metadata.recordingActive = false
-  session.metadata.finalizedAt = new Date().toISOString()
+
+  const nowIso = new Date().toISOString()
+  const sessionMetaPatch = {
+    email: metadata.email ? String(metadata.email).trim() : undefined,
+    country: metadata.country ? String(metadata.country).trim() : undefined,
+    phone: metadata.phone ? String(metadata.phone).trim() : undefined,
+    source: metadata.source ? String(metadata.source).trim() : undefined,
+    questions: questions.length ? questions : undefined,
+    interviewId: metadata.interviewId || undefined,
+    stack: stackFromInterview || undefined,
+    recordingActive: false,
+    finalizedAt: nowIso,
+  }
 
   const fileEntry = {
     id: Date.now().toString(),
@@ -781,23 +761,43 @@ app.post(withBackendPrefix('/upload-answer'), upload.single('video'), (req, res)
   if (!OPENAI_KEY) setFileAnalysisState(fileEntry, { status: 'unavailable', message: 'OpenAI not configured (set OPENAI_API_KEY).' })
   else setFileAnalysisState(fileEntry, { status: 'pending', message: 'Evaluation pending…' })
 
-  const finalize = async () => {
-    if (cloudinaryClient) {
-      try {
-        const r = await cloudinaryClient.uploader.upload(path.join(UPLOAD_DIR, file.filename), { resource_type: 'video' })
-        fileEntry.remoteUrl = r.secure_url
-      } catch (err) {
-        console.warn('Cloudinary upload failed', err.message || err)
-      }
-    }
-    session.files.push(fileEntry)
-    session.lastUploadedAt = fileEntry.uploadedAt
-    // update session name if provided
-    if (metadata.name) session.name = metadata.name
-    fs.writeFileSync(RECORDS_FILE, JSON.stringify(records, null, 2))
+  try {
+    // Persist session + file to Postgres
+    await db.upsertSession({
+      id: sessionId,
+      sessionId,
+      name: metadata.name ? String(metadata.name).trim() : 'Unknown',
+      createdAt: nowIso,
+      lastUploadedAt: fileEntry.uploadedAt,
+      metadataPatch: sessionMetaPatch,
+    })
 
-    // Best-effort thumbnail generation (async; does not block response).
+    await db.insertFile({
+      sessionId,
+      file: {
+        ...fileEntry,
+        remoteUrl: fileEntry.remoteUrl,
+        thumbnailPath: fileEntry.thumbnailPath,
+        analysis: fileEntry.analysis,
+      },
+    })
+
+    // Background tasks (do not block response)
     ;(async () => {
+      // Cloudinary upload
+      if (cloudinaryClient) {
+        try {
+          const r = await cloudinaryClient.uploader.upload(path.join(UPLOAD_DIR, file.filename), { resource_type: 'video' })
+          if (r && r.secure_url) {
+            fileEntry.remoteUrl = r.secure_url
+            await db.updateFileFields({ sessionId, fileId: fileEntry.id, patch: { remoteUrl: r.secure_url } })
+          }
+        } catch (err) {
+          console.warn('Cloudinary upload failed', err.message || err)
+        }
+      }
+
+      // Thumbnail
       try {
         const inputPath = path.join(UPLOAD_DIR, file.filename)
         const thumbName = makeThumbName(file.filename)
@@ -805,40 +805,35 @@ app.post(withBackendPrefix('/upload-answer'), upload.single('video'), (req, res)
         const r = await generateThumbnail({ inputPath, thumbAbsPath })
         if (r && r.ok) {
           fileEntry.thumbnailPath = `/uploads/thumbs/${thumbName}`
-          fs.writeFileSync(RECORDS_FILE, JSON.stringify(records, null, 2))
+          await db.updateFileFields({ sessionId, fileId: fileEntry.id, patch: { thumbnailPath: fileEntry.thumbnailPath } })
         }
+      } catch (e) {}
+
+      // Cleanup chunks
+      try {
+        const chunkFiles = fs.readdirSync(CHUNK_DIR).filter(f => f.startsWith(`${sessionId}-chunk-`))
+        for (const f of chunkFiles) {
+          try { fs.unlinkSync(path.join(CHUNK_DIR, f)) } catch (e) {}
+        }
+      } catch (e) {}
+
+      // Evaluation
+      try {
+        const abs = path.join(UPLOAD_DIR, file.filename)
+        await enqueueAnalysisJob(() => analyzeAndGradeRecording({ absFilePath: abs, fileEntry, questions, stack: stackFromInterview || '' }))
+        await db.updateFileFields({ sessionId, fileId: fileEntry.id, patch: { analysis: fileEntry.analysis } })
       } catch (e) {}
     })()
 
-    // Cleanup: if chunk files exist for this session, delete them.
-    // We keep chunk uploads as a resilience mechanism, but prefer the final single file for playback reliability.
-    try {
-      const chunkFiles = fs.readdirSync(CHUNK_DIR).filter(f => f.startsWith(`${sessionId}-chunk-`))
-      for (const f of chunkFiles) {
-        try { fs.unlinkSync(path.join(CHUNK_DIR, f)) } catch (e) {}
-      }
-    } catch (e) {}
-
-    // After saving, run evaluation asynchronously (no transcript persistence).
-    ;(async () => {
-      try {
-        await enqueueAnalysisJob(() => analyzeAndGradeRecording({ absFilePath: path.join(UPLOAD_DIR, file.filename), fileEntry, session }))
-      } finally {
-        try { fs.writeFileSync(RECORDS_FILE, JSON.stringify(records, null, 2)) } catch (e) {}
-      }
-    })()
-  }
-
-  finalize().then(() => {
     return res.json({ ok: true, file: file.filename, metadata, fileEntry, sessionId })
-  }).catch(err => {
+  } catch (err) {
     console.error(err)
     return res.status(500).json({ error: 'Save failed' })
-  })
+  }
 })
 
 // Receive chunked uploads. Stores each chunk as a separate file under chunks/.
-app.post(withBackendPrefix('/upload-chunk'), upload.single('video'), (req, res) => {
+app.post(withBackendPrefix('/upload-chunk'), upload.single('video'), async (req, res) => {
   const file = req.file;
   const metadata = req.body.metadata ? (() => { try { return JSON.parse(req.body.metadata) } catch { return {} } })() : {};
   if (!file) return res.status(400).json({ error: 'No chunk uploaded' });
@@ -847,41 +842,39 @@ app.post(withBackendPrefix('/upload-chunk'), upload.single('video'), (req, res) 
   const index = (typeof metadata.index !== 'undefined' && metadata.index !== null) ? metadata.index : Date.now()
   console.log('Received /upload-chunk:', { orig: file.originalname, stored: file.filename, metadata, sessionId, index })
 
-  // Ensure we persist session metadata early so background assembly never creates "Unknown" sessions.
+  // Persist session metadata early (Postgres). To reduce write load, only update on the first chunk and periodically.
   try {
-    const records = JSON.parse(fs.readFileSync(RECORDS_FILE, 'utf8') || '[]')
-    let session = records.find(r => r.id === sessionId || r.sessionId === sessionId)
-    if (!session) {
-      session = { id: sessionId, sessionId, name: metadata.name || 'Unknown', createdAt: new Date().toISOString(), files: [], metadata: {} }
-      records.push(session)
+    const idxNum = Number(index)
+    const shouldPersist = !Number.isFinite(idxNum) || idxNum === 0 || (idxNum % 5 === 0)
+    if (shouldPersist) {
+      const questions = Array.isArray(metadata.questions) ? normalizeQuestionsArray(metadata.questions) : []
+      let stackFromInterview = ''
+      if (metadata.interviewId) {
+        try {
+          const interviews = readJsonArray(INTERVIEWS_FILE)
+          const interview = interviews.find(i => i.id === metadata.interviewId)
+          if (interview && interview.stack) stackFromInterview = interview.stack
+        } catch (e) {}
+      }
+      await db.upsertSession({
+        id: sessionId,
+        sessionId,
+        name: metadata.name ? String(metadata.name).trim() : 'Unknown',
+        createdAt: new Date().toISOString(),
+        metadataPatch: {
+          email: metadata.email ? String(metadata.email).trim() : undefined,
+          country: metadata.country ? String(metadata.country).trim() : undefined,
+          phone: metadata.phone ? String(metadata.phone).trim() : undefined,
+          source: metadata.source ? String(metadata.source).trim() : undefined,
+          questions: questions.length ? questions : undefined,
+          interviewId: metadata.interviewId || undefined,
+          stack: stackFromInterview || undefined,
+          recordingActive: true,
+          lastChunkAt: new Date().toISOString(),
+        },
+      })
     }
-    session.metadata = session.metadata || {}
-    if (metadata.name && String(metadata.name).trim()) session.name = String(metadata.name).trim()
-    if (metadata.email) session.metadata.email = String(metadata.email).trim()
-    if (metadata.country) session.metadata.country = String(metadata.country).trim()
-    if (metadata.phone) session.metadata.phone = String(metadata.phone).trim()
-    if (metadata.source) session.metadata.source = String(metadata.source).trim()
-    if (Array.isArray(metadata.questions)) {
-      const qs = normalizeQuestionsArray(metadata.questions)
-      if (qs.length) session.metadata.questions = qs
-    }
-    if (metadata.interviewId) {
-      session.metadata.interviewId = metadata.interviewId
-      const interviews = readJsonArray(INTERVIEWS_FILE)
-      const interview = interviews.find(i => i.id === metadata.interviewId)
-      if (interview && interview.stack) session.metadata.stack = interview.stack
-    }
-    // Avoid writing records.json on every chunk (major load under concurrency).
-    // Only persist if this is the first time we see the session OR if recordingActive wasn't set.
-    const wasRecordingActive = session.metadata.recordingActive === true
-    session.metadata.recordingActive = true
-    if (!wasRecordingActive || session.name === 'Unknown') {
-      session.metadata.lastChunkAt = new Date().toISOString()
-      fs.writeFileSync(RECORDS_FILE, JSON.stringify(records, null, 2))
-    }
-  } catch (e) {
-    // ignore persistence errors
-  }
+  } catch (e) {}
   // move chunk file into CHUNK_DIR with session prefix
   const chunkName = `${sessionId}-chunk-${index}-${file.filename}`
   const dest = path.join(CHUNK_DIR, chunkName)
@@ -950,45 +943,47 @@ async function assembleChunks(sessionId, name, interviewId, candidate) {
     throw new Error('assembled file is empty (no usable media)')
   }
 
-  // create session entry and attach file
-  const records = JSON.parse(fs.readFileSync(RECORDS_FILE, 'utf8') || '[]')
-  let session = records.find(r => r.id === sessionId || r.sessionId === sessionId)
-  if (!session) {
-    session = { id: sessionId, sessionId, name: name || 'Unknown', createdAt: new Date().toISOString(), files: [], metadata: {} }
-    records.push(session)
-  }
-  session.metadata = session.metadata || {}
-  // if we already know the session name (from upload-chunk), don't overwrite it
-  if (!session.name || session.name === 'Unknown') {
-    if (name) session.name = name
-  }
-  if (candidate) {
-    if (candidate.email) session.metadata.email = String(candidate.email).trim()
-    if (candidate.country) session.metadata.country = String(candidate.country).trim()
-    if (candidate.phone) session.metadata.phone = String(candidate.phone).trim()
-    if (candidate.source) session.metadata.source = String(candidate.source).trim()
-    if (Array.isArray(candidate.questions)) {
-      const qs = normalizeQuestionsArray(candidate.questions)
-      if (qs.length) session.metadata.questions = qs
-    }
-  }
+  const nowIso = new Date().toISOString()
+  const questions = Array.isArray(candidate?.questions) ? normalizeQuestionsArray(candidate.questions) : []
+  let stackFromInterview = ''
   if (interviewId) {
-    session.metadata.interviewId = interviewId
-    // attach stack if we can resolve it
-    const interviews = readJsonArray(INTERVIEWS_FILE)
-    const interview = interviews.find(i => i.id === interviewId)
-    if (interview && interview.stack) session.metadata.stack = interview.stack
+    try {
+      const interviews = readJsonArray(INTERVIEWS_FILE)
+      const interview = interviews.find(i => i.id === interviewId)
+      if (interview && interview.stack) stackFromInterview = interview.stack
+    } catch (e) {}
   }
-  // Mark as finalized after assembly
-  session.metadata.recordingActive = false
-  session.metadata.finalizedAt = new Date().toISOString()
-  const fileEntry = { id: Date.now().toString(), filename: outName, path: `/uploads/${outName}`, question: null, index: null, uploadedAt: new Date().toISOString() }
-  session.files.push(fileEntry)
-  session.lastUploadedAt = fileEntry.uploadedAt
-  if (name) session.name = name
-  fs.writeFileSync(RECORDS_FILE, JSON.stringify(records, null, 2))
 
-  // Best-effort thumbnail generation (async).
+  // Mark as finalized after assembly
+  const fileEntry = { id: Date.now().toString(), filename: outName, path: `/uploads/${outName}`, question: null, index: null, uploadedAt: nowIso }
+  if (!OPENAI_KEY) setFileAnalysisState(fileEntry, { status: 'unavailable', message: 'OpenAI not configured (set OPENAI_API_KEY).' })
+  else setFileAnalysisState(fileEntry, { status: 'pending', message: 'Evaluation pending…' })
+
+  await db.upsertSession({
+    id: sessionId,
+    sessionId,
+    name: name ? String(name).trim() : 'Unknown',
+    createdAt: nowIso,
+    lastUploadedAt: fileEntry.uploadedAt,
+    metadataPatch: {
+      email: candidate?.email ? String(candidate.email).trim() : undefined,
+      country: candidate?.country ? String(candidate.country).trim() : undefined,
+      phone: candidate?.phone ? String(candidate.phone).trim() : undefined,
+      source: candidate?.source ? String(candidate.source).trim() : undefined,
+      questions: questions.length ? questions : undefined,
+      interviewId: interviewId || undefined,
+      stack: stackFromInterview || undefined,
+      recordingActive: false,
+      finalizedAt: nowIso,
+    },
+  })
+
+  await db.insertFile({
+    sessionId,
+    file: { ...fileEntry, analysis: fileEntry.analysis },
+  })
+
+  // Best-effort thumbnail + evaluation in background.
   ;(async () => {
     try {
       const thumbName = makeThumbName(outName)
@@ -996,8 +991,13 @@ async function assembleChunks(sessionId, name, interviewId, candidate) {
       const r = await generateThumbnail({ inputPath: outPath, thumbAbsPath })
       if (r && r.ok) {
         fileEntry.thumbnailPath = `/uploads/thumbs/${thumbName}`
-        fs.writeFileSync(RECORDS_FILE, JSON.stringify(records, null, 2))
+        await db.updateFileFields({ sessionId, fileId: fileEntry.id, patch: { thumbnailPath: fileEntry.thumbnailPath } })
       }
+    } catch (e) {}
+
+    try {
+      await enqueueAnalysisJob(() => analyzeAndGradeRecording({ absFilePath: outPath, fileEntry, questions, stack: stackFromInterview || '' }))
+      await db.updateFileFields({ sessionId, fileId: fileEntry.id, patch: { analysis: fileEntry.analysis } })
     } catch (e) {}
   })()
 
@@ -1005,15 +1005,6 @@ async function assembleChunks(sessionId, name, interviewId, candidate) {
   for (const f of files) {
     try { fs.unlinkSync(path.join(CHUNK_DIR, f)) } catch (e) {}
   }
-
-  // trigger transcription and assessment asynchronously
-  ;(async () => {
-    try {
-      await enqueueAnalysisJob(() => analyzeAndGradeRecording({ absFilePath: outPath, fileEntry, session }))
-    } finally {
-      try { fs.writeFileSync(RECORDS_FILE, JSON.stringify(records, null, 2)) } catch (e) {}
-    }
-  })()
 
   return fileEntry
 }
@@ -1026,8 +1017,7 @@ app.post(withBackendPrefix('/upload-complete'), express.json(), async (req, res)
   // Guard: don't assemble while the candidate is still recording.
   // Some browsers fire visibility/unload events mid-recording; without this, we'd create partial files.
   try {
-    const records = readRecords()
-    const session = findSession(records, sessionId)
+    const session = await db.getSession(sessionId)
     if (session?.metadata?.recordingActive === true) {
       return res.status(409).json({ error: 'Recording still in progress. Please try again after recording stops.' })
     }
@@ -1054,17 +1044,15 @@ app.get(withBackendPrefix('/upload-complete-beacon'), (req, res) => {
   const force = String(req.query.force || '').toLowerCase() === 'true' || String(req.query.force || '') === '1'
   if (!sessionId) return res.status(400).json({ error: 'sessionId required' })
 
-  // Guard: don't assemble while recording is active. Just accept the beacon and no-op.
-  try {
-    const records = readRecords()
-    const session = findSession(records, sessionId)
-    if (!force && session?.metadata?.recordingActive === true) {
-      return res.status(202).json({ ok: true, message: 'Recording active; assemble skipped' })
-    }
-  } catch (e) {}
-
   // run in background, don't block the request
-  assembleChunks(sessionId, name, interviewId, { email, country, phone, source }).then(file => {
+  ;(async () => {
+    try {
+      const session = await db.getSession(sessionId)
+      if (!force && session?.metadata?.recordingActive === true) return
+    } catch (e) {}
+
+    return assembleChunks(sessionId, name, interviewId, { email, country, phone, source })
+  })().then(file => {
     console.log('Beacon assembled session', sessionId, '->', file.filename)
   }).catch(err => {
     // It's normal to have no chunks (e.g. tab closed before first timeslice, or final file upload path used).
@@ -1078,14 +1066,13 @@ app.get(withBackendPrefix('/upload-complete-beacon'), (req, res) => {
 })
 
 // Accept POST beacons too (navigator.sendBeacon will POST a small payload)
-app.post(withBackendPrefix('/upload-complete-beacon'), express.json(), (req, res) => {
+app.post(withBackendPrefix('/upload-complete-beacon'), express.json(), async (req, res) => {
   const { sessionId, name, interviewId, email, country, phone, source, force, questions } = req.body || {}
   if (!sessionId) return res.status(400).json({ error: 'sessionId required' })
 
   // Guard: don't assemble while recording is active. Just accept the beacon and no-op.
   try {
-    const records = readRecords()
-    const session = findSession(records, sessionId)
+    const session = await db.getSession(sessionId)
     if (!force && session?.metadata?.recordingActive === true) {
       return res.status(202).json({ ok: true, message: 'Recording active; assemble skipped' })
     }
@@ -1105,49 +1092,50 @@ app.post(withBackendPrefix('/upload-complete-beacon'), express.json(), (req, res
 
 // Background scanner: assemble stale chunk groups after a short inactivity window
 setInterval(() => {
-  try {
-    const files = fs.readdirSync(CHUNK_DIR)
-    const groups = {}
-    for (const f of files) {
-      const m = f.match(/^(.*?)-chunk-/)
-      if (!m) continue
-      const sid = m[1]
-      groups[sid] = groups[sid] || []
-      groups[sid].push(f)
-    }
-    const now = Date.now()
-    for (const sid of Object.keys(groups)) {
-      // If we have a session record, avoid assembling while recording is active or if already finalized.
-      try {
-        const records = JSON.parse(fs.readFileSync(RECORDS_FILE, 'utf8') || '[]')
-        const session = records.find(r => r.id === sid || r.sessionId === sid)
-        if (session && session.metadata) {
-          if (session.metadata.recordingActive === true) continue
-          if (session.metadata.finalizedAt) continue
+  ;(async () => {
+    try {
+      const files = fs.readdirSync(CHUNK_DIR)
+      const groups = {}
+      for (const f of files) {
+        const m = f.match(/^(.*?)-chunk-/)
+        if (!m) continue
+        const sid = m[1]
+        groups[sid] = groups[sid] || []
+        groups[sid].push(f)
+      }
+      const now = Date.now()
+      for (const sid of Object.keys(groups)) {
+        // If we have a session record, avoid assembling while recording is active or if already finalized.
+        try {
+          const session = await db.getSession(sid)
+          if (session && session.metadata) {
+            if (session.metadata.recordingActive === true) continue
+            if (session.metadata.finalizedAt) continue
+          }
+        } catch (e) {
+          // ignore DB errors and proceed with mtime-based decision
         }
-      } catch (e) {
-        // ignore
-      }
 
-      // check most recent mtime of group's files
-      let latest = 0
-      for (const fn of groups[sid]) {
-        const st = fs.statSync(path.join(CHUNK_DIR, fn))
-        const mtime = st.mtimeMs || st.mtime.getTime()
-        if (mtime > latest) latest = mtime
+        // check most recent mtime of group's files
+        let latest = 0
+        for (const fn of groups[sid]) {
+          const st = fs.statSync(path.join(CHUNK_DIR, fn))
+          const mtime = st.mtimeMs || st.mtime.getTime()
+          if (mtime > latest) latest = mtime
+        }
+        // if no chunk activity for 30 seconds, attempt assembly
+        if (now - latest > 30_000) {
+          console.log('Background assembler: assembling stale session', sid)
+          assembleChunks(sid)
+            .then(f => console.log('Background assembled', sid, f && f.filename))
+            .catch(e => {
+              if ((e && e.message) === 'no chunks found') return
+              console.warn('Background assemble failed', sid, e.message || e)
+            })
+        }
       }
-      // if no chunk activity for 30 seconds, attempt assembly
-      if (now - latest > 30_000) {
-        console.log('Background assembler: assembling stale session', sid)
-        assembleChunks(sid)
-          .then(f => console.log('Background assembled', sid, f && f.filename))
-          .catch(e => {
-            if ((e && e.message) === 'no chunks found') return
-            console.warn('Background assemble failed', sid, e.message || e)
-          })
-      }
-    }
-  } catch (err) { /* ignore scanning errors */ }
+    } catch (err) { /* ignore scanning errors */ }
+  })()
 }, 20_000)
 
 // ---------------- Interview sessions (admin-managed) ------------------------
@@ -1232,19 +1220,13 @@ app.post(withBackendPrefix('/converse'), express.json(), async (req, res) => {
     const data = await resp.json()
     const reply = data?.choices?.[0]?.message?.content || "I'm sorry, I couldn't generate a response."
 
-    // Optionally append conversation to records.json under the session entry
+    // Optionally persist conversation to Postgres under the session entry
     try {
       if (sessionId) {
-        const records = JSON.parse(fs.readFileSync(RECORDS_FILE, 'utf8') || '[]')
-        let entry = records.find(r => r.id === sessionId || r.sessionId === sessionId)
-        if (!entry) {
-          entry = { id: sessionId, sessionId, name: 'Unknown', createdAt: new Date().toISOString(), files: [] }
-          records.push(entry)
-        }
-        entry.conversation = entry.conversation || []
-        entry.conversation.push({ role: 'user', text, at: new Date().toISOString() })
-        entry.conversation.push({ role: 'assistant', text: reply, at: new Date().toISOString() })
-        fs.writeFileSync(RECORDS_FILE, JSON.stringify(records, null, 2))
+        const nowIso = new Date().toISOString()
+        await db.upsertSession({ id: sessionId, sessionId, name: 'Unknown', createdAt: nowIso, metadataPatch: {} })
+        await db.insertConversationMessage({ sessionId, role: 'user', text, at: nowIso })
+        await db.insertConversationMessage({ sessionId, role: 'assistant', text: reply, at: new Date().toISOString() })
       }
     } catch (err) {
       console.warn('Could not persist conversation', err.message || err)
@@ -1276,99 +1258,101 @@ app.get(withBackendPrefix('/admin/recordings'), (req, res) => {
   } catch (err) {
     return res.status(401).json({ error: 'Invalid token' })
   }
-  const records = JSON.parse(fs.readFileSync(RECORDS_FILE, 'utf8') || '[]')
-
   // Pagination (optional): /admin/recordings?offset=0&limit=10&summary=1
   const offset = Math.max(0, Number.parseInt(req.query.offset, 10) || 0)
   const limitRaw = Number.parseInt(req.query.limit, 10)
-  const limit = (Number.isFinite(limitRaw) && limitRaw > 0) ? Math.min(limitRaw, 200) : null
+  const limit = (Number.isFinite(limitRaw) && limitRaw > 0) ? Math.min(limitRaw, 200) : 10
   const summary = String(req.query.summary || '') === '1' || String(req.query.summary || '').toLowerCase() === 'true'
 
-  // Sort newest-first for stable pagination.
-  const sorted = [...records].sort((a, b) => {
-    const at = new Date(a?.lastUploadedAt || a?.createdAt || 0).getTime()
-    const bt = new Date(b?.lastUploadedAt || b?.createdAt || 0).getTime()
-    if (bt !== at) return bt - at
-    return String(b?.id || '').localeCompare(String(a?.id || ''))
-  })
-
-  const total = sorted.length
-  const page = (limit == null) ? sorted : sorted.slice(offset, offset + limit)
   // For local files, return a URL that works behind nginx `/backend/` proxy.
   // We serve uploads at both `/uploads` and `/backend/uploads` on the node server.
   const uploadsPrefix = '/backend'
-  const list = page.map(s => ({
-    id: s.id,
-    sessionId: s.sessionId || s.id,
-    name: s.name || s.metadata?.name || 'Unknown',
-    metadata: s.metadata || {},
-    createdAt: s.createdAt || s.uploadedAt,
-    lastUploadedAt: s.lastUploadedAt,
-    filesCount: Array.isArray(s.files) ? s.files.length : 0,
-    previewUrl: (() => {
-      try {
-        const files = Array.isArray(s.files) ? s.files : []
-        const last = files.length ? files[files.length - 1] : null
-        if (!last) return ''
-        // Prefer remote URL if present, else local file URL
-        if (last.remoteUrl) return String(last.remoteUrl)
-        if (last.path) return toAbsoluteUrl(req, `${uploadsPrefix}${last.path}`)
-      } catch (e) {}
-      return ''
-    })(),
-    thumbnailUrl: (() => {
-      try {
-        const files = Array.isArray(s.files) ? s.files : []
-        const last = files.length ? files[files.length - 1] : null
-        if (last && last.thumbnailPath) return toAbsoluteUrl(req, `${uploadsPrefix}${last.thumbnailPath}`)
-      } catch (e) {}
-      return ''
-    })(),
-    files: summary ? [] : (s.files || []).map(f => ({
-      id: f.id,
-      filename: f.filename,
-      question: f.question,
-      index: f.index,
-      uploadedAt: f.uploadedAt,
-      // Always return an absolute URL so the admin <video> element loads from the backend
-      // even when the frontend is served from a different origin (e.g. preview server).
-      url: f.remoteUrl || toAbsoluteUrl(req, `${uploadsPrefix}${f.path}`),
-      thumbnailUrl: f.thumbnailPath ? toAbsoluteUrl(req, `${uploadsPrefix}${f.thumbnailPath}`) : '',
-      analysis: f.analysis,
-    })),
-    conversation: s.conversation || []
-  }))
-  return res.json({ recordings: list, total, offset, limit: limit ?? total })
+
+  ;(async () => {
+    const page = await db.listSessionsPage({ offset, limit, summary: true })
+    const list = await Promise.all(page.sessions.map(async (s) => {
+      let files = []
+      if (!summary) {
+        const details = await db.getSessionDetails(s.id)
+        files = (details?.files || []).map(f => ({
+          id: f.id,
+          filename: f.filename,
+          question: f.question,
+          index: f.index,
+          uploadedAt: f.uploadedAt,
+          url: f.remoteUrl || toAbsoluteUrl(req, `${uploadsPrefix}${f.path}`),
+          thumbnailUrl: f.thumbnailPath ? toAbsoluteUrl(req, `${uploadsPrefix}${f.thumbnailPath}`) : '',
+          analysis: f.analysis,
+        }))
+      }
+
+      const previewUrl = (() => {
+        try {
+          if (s.lastFile?.remoteUrl) return String(s.lastFile.remoteUrl)
+          if (s.lastFile?.path) return toAbsoluteUrl(req, `${uploadsPrefix}${s.lastFile.path}`)
+        } catch (e) {}
+        return ''
+      })()
+      const thumbnailUrl = (() => {
+        try {
+          if (s.lastFile?.thumbnailPath) return toAbsoluteUrl(req, `${uploadsPrefix}${s.lastFile.thumbnailPath}`)
+        } catch (e) {}
+        return ''
+      })()
+
+      return {
+        id: s.id,
+        sessionId: s.sessionId || s.id,
+        name: s.name || s.metadata?.name || 'Unknown',
+        metadata: s.metadata || {},
+        createdAt: s.createdAt,
+        lastUploadedAt: s.lastUploadedAt,
+        filesCount: s.filesCount || 0,
+        previewUrl,
+        thumbnailUrl,
+        files: summary ? [] : files,
+        conversation: [],
+      }
+    }))
+    return res.json({ recordings: list, total: page.total, offset: page.offset, limit: page.limit })
+  })().catch((err) => {
+    console.error('admin/recordings failed', err.message || err)
+    return res.status(500).json({ error: 'Could not load recordings' })
+  })
 })
 
 // Fetch one recording session with full files (protected)
 app.get(withBackendPrefix('/admin/recordings/:id'), (req, res) => {
   if (!requireAdmin(req, res)) return
   const id = req.params.id
-  const records = readRecords()
-  const session = findSession(records, id)
-  if (!session) return res.status(404).json({ error: 'Not found' })
   const uploadsPrefix = '/backend'
-  const out = {
-    id: session.id,
-    sessionId: session.sessionId || session.id,
-    name: session.name || session.metadata?.name || 'Unknown',
-    metadata: session.metadata || {},
-    createdAt: session.createdAt || session.uploadedAt,
-    lastUploadedAt: session.lastUploadedAt,
-    files: (session.files || []).map(f => ({
-      id: f.id,
-      filename: f.filename,
-      question: f.question,
-      index: f.index,
-      uploadedAt: f.uploadedAt,
-      url: f.remoteUrl || toAbsoluteUrl(req, `${uploadsPrefix}${f.path}`),
-      thumbnailUrl: f.thumbnailPath ? toAbsoluteUrl(req, `${uploadsPrefix}${f.thumbnailPath}`) : '',
-      analysis: f.analysis,
-    })),
-    conversation: session.conversation || []
-  }
-  return res.json({ ok: true, recording: out })
+  ;(async () => {
+    const session = await db.getSessionDetails(id)
+    if (!session) return res.status(404).json({ error: 'Not found' })
+    const out = {
+      id: session.id,
+      sessionId: session.sessionId || session.id,
+      name: session.name || session.metadata?.name || 'Unknown',
+      metadata: session.metadata || {},
+      createdAt: session.createdAt,
+      lastUploadedAt: session.lastUploadedAt,
+      files: (session.files || []).map(f => ({
+        id: f.id,
+        filename: f.filename,
+        question: f.question,
+        index: f.index,
+        uploadedAt: f.uploadedAt,
+        url: f.remoteUrl || toAbsoluteUrl(req, `${uploadsPrefix}${f.path}`),
+        thumbnailUrl: f.thumbnailPath ? toAbsoluteUrl(req, `${uploadsPrefix}${f.thumbnailPath}`) : '',
+        analysis: f.analysis,
+      })),
+      conversation: session.conversation || []
+    }
+    return res.json({ ok: true, recording: out })
+  })().catch((err) => {
+    console.error('admin/recordings/:id failed', err.message || err)
+    return res.status(500).json({ error: 'Could not load recording' })
+  })
 })
 
 // Delete a session and associated files (protected)
@@ -1380,24 +1364,26 @@ app.delete(['/admin/recordings/:id', '/backend/admin/recordings/:id'], (req, res
   try { jwt.verify(token, ADMIN_SECRET) } catch (err) { return res.status(401).json({ error: 'Invalid token' }) }
 
   const id = req.params.id
-  const records = JSON.parse(fs.readFileSync(RECORDS_FILE, 'utf8') || '[]')
-  const idx = records.findIndex(r => r.id === id || r.sessionId === id)
-  if (idx === -1) return res.status(404).json({ error: 'Not found' })
-  const session = records[idx]
-  // remove files from disk
-  try {
-    (session.files || []).forEach(f => {
-      const p = path.join(UPLOAD_DIR, f.filename)
-      if (fs.existsSync(p)) {
-        try { fs.unlinkSync(p) } catch (e) { console.warn('Could not delete', p, e.message || e) }
-      }
-    })
-  } catch (err) { console.warn('delete files error', err.message || err) }
+  ;(async () => {
+    const session = await db.getSessionDetails(id)
+    if (!session) return res.status(404).json({ error: 'Not found' })
 
-  // remove session from records
-  records.splice(idx, 1)
-  fs.writeFileSync(RECORDS_FILE, JSON.stringify(records, null, 2))
-  return res.json({ ok: true })
+    // remove files from disk
+    try {
+      (session.files || []).forEach(f => {
+        const p = path.join(UPLOAD_DIR, f.filename)
+        if (f.filename && fs.existsSync(p)) {
+          try { fs.unlinkSync(p) } catch (e) { console.warn('Could not delete', p, e.message || e) }
+        }
+      })
+    } catch (err) { console.warn('delete files error', err.message || err) }
+
+    await db.deleteSession(session.id)
+    return res.json({ ok: true })
+  })().catch((err) => {
+    console.error('delete session failed', err.message || err)
+    return res.status(500).json({ error: 'Could not delete session' })
+  })
 })
 
 // Delete a single file within a session (protected)
@@ -1408,34 +1394,32 @@ app.delete(['/admin/recordings/:sessionId/files/:fileId', '/backend/admin/record
   const fileId = req.params.fileId
   if (!sessionId || !fileId) return res.status(400).json({ error: 'sessionId and fileId required' })
 
-  const records = readRecords()
-  const session = findSession(records, sessionId)
-  if (!session) return res.status(404).json({ error: 'Session not found' })
+  ;(async () => {
+    const session = await db.getSession(sessionId)
+    if (!session) return res.status(404).json({ error: 'Session not found' })
 
-  session.files = Array.isArray(session.files) ? session.files : []
-  const idx = session.files.findIndex(f => String(f?.id) === String(fileId))
-  if (idx === -1) return res.status(404).json({ error: 'File not found' })
+    const file = await db.getFile({ sessionId, fileId })
+    if (!file) return res.status(404).json({ error: 'File not found' })
 
-  const file = session.files[idx]
-  session.files.splice(idx, 1)
-  session.lastUploadedAt = (session.files[session.files.length - 1]?.uploadedAt) || session.lastUploadedAt
+    // Remove local file from disk (if it exists)
+    try {
+      const p = path.join(UPLOAD_DIR, file.filename)
+      if (file.filename && fs.existsSync(p)) {
+        try { fs.unlinkSync(p) } catch (e) { console.warn('Could not delete', p, e.message || e) }
+      }
+    } catch (e) {}
 
-  // Remove local file from disk (if it exists)
-  try {
-    const p = path.join(UPLOAD_DIR, file.filename)
-    if (file.filename && fs.existsSync(p)) {
-      try { fs.unlinkSync(p) } catch (e) { console.warn('Could not delete', p, e.message || e) }
-    }
-  } catch (e) {}
+    await db.deleteFile({ sessionId, fileId })
+    await db.recomputeLastUploadedAt(sessionId)
 
-  // Persist records update
-  try {
-    fs.writeFileSync(RECORDS_FILE, JSON.stringify(records, null, 2))
-  } catch (e) {
-    return res.status(500).json({ error: 'Could not save records' })
-  }
-
-  return res.json({ ok: true, sessionId: session.id, deletedFileId: fileId, remainingFiles: session.files.length })
+    // return remaining files count
+    const details = await db.getSessionDetails(sessionId)
+    const remaining = (details?.files || []).length
+    return res.json({ ok: true, sessionId, deletedFileId: fileId, remainingFiles: remaining })
+  })().catch((err) => {
+    console.error('delete file failed', err.message || err)
+    return res.status(500).json({ error: 'Could not delete file' })
+  })
 })
 
 // Serve uploads statically
@@ -1471,16 +1455,47 @@ app.use((err, req, res, next) => {
   }
 })
 
-const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => {
-  // Log ffmpeg status once at startup so operators can confirm whether the server is using it.
-  const ff = detectFfmpegAvailability()
-  if (ff.disabled) {
-    console.log('ffmpeg: disabled (ENABLE_FFMPEG=false)')
-  } else if (ff.available) {
-    console.log(`ffmpeg: detected (${ff.versionLine || 'version unknown'})`)
-  } else {
-    console.warn('ffmpeg: NOT found in PATH; running in fallback mode (install ffmpeg or add it to PATH).')
+async function startServer() {
+  await db.initDb()
+
+  // Auto-migrate records.json -> Postgres ONCE (only when DB is empty)
+  try {
+    const auto = String(process.env.AUTO_MIGRATE_RECORDS_JSON || '').toLowerCase()
+    const enabled = (auto === '' || auto === '1' || auto === 'true' || auto === 'yes')
+    if (enabled) {
+      const already = await db.getMeta('records_json_migrated_at')
+      const count = await db.countSessions()
+      if (!already && count === 0) {
+        const recPath = path.join(__dirname, 'records.json')
+        const r = await migrateRecordsJsonToPostgres({ recordsJsonPath: recPath })
+        if (!r.skipped) {
+          await db.setMeta('records_json_migrated_at', new Date().toISOString())
+          console.log(`Auto-migrated records.json -> Postgres (sessions: ${r.sessions}, files: ${r.files}, messages: ${r.messages})`)
+        } else {
+          console.log(`Auto-migrate skipped: ${r.reason}`)
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('Auto-migrate failed (continuing):', e?.message || e)
   }
-  console.log(`Server listening on http://localhost:${PORT}`);
-});
+
+  const PORT = process.env.PORT || 4000
+  app.listen(PORT, () => {
+    // Log ffmpeg status once at startup so operators can confirm whether the server is using it.
+    const ff = detectFfmpegAvailability()
+    if (ff.disabled) {
+      console.log('ffmpeg: disabled (ENABLE_FFMPEG=false)')
+    } else if (ff.available) {
+      console.log(`ffmpeg: detected (${ff.versionLine || 'version unknown'})`)
+    } else {
+      console.warn('ffmpeg: NOT found in PATH; running in fallback mode (install ffmpeg or add it to PATH).')
+    }
+    console.log(`Server listening on http://localhost:${PORT}`)
+  })
+}
+
+startServer().catch((err) => {
+  console.error('Server failed to start:', err?.message || err)
+  process.exit(1)
+})
