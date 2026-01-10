@@ -387,10 +387,22 @@ export default function Interview({ name, email, country, phone, interviewId, st
             const filename = `${sessionIdRef.current || 'session'}-${Date.now()}.${ext}`
             fd.append('video', blob, filename)
             fd.append('metadata', JSON.stringify({ sessionId: sessionIdRef.current, name, email, country, phone, interviewId, source: refSource, questions: questionsRef.current }))
-            const resp = await fetch(`${API_BASE}/upload-answer`, { method: 'POST', body: fd })
-            // server returns JSON; ignore parsing failures (e.g. if server errors)
-            try { await resp.json() } catch (e) {}
-            if (!resp.ok) throw new Error(`upload-answer failed (${resp.status})`)
+            // Retry final upload a couple times for transient server load / network blips.
+            let lastErr = null
+            for (let attempt = 0; attempt < 3; attempt++) {
+              try {
+                const resp = await fetch(`${API_BASE}/upload-answer`, { method: 'POST', body: fd })
+                // server returns JSON; ignore parsing failures (e.g. if server errors)
+                try { await resp.json() } catch (e) {}
+                if (!resp.ok) throw new Error(`upload-answer failed (${resp.status})`)
+                lastErr = null
+                break
+              } catch (err) {
+                lastErr = err
+                await new Promise(r => setTimeout(r, 600 * (attempt + 1)))
+              }
+            }
+            if (lastErr) throw lastErr
             setLastRecording({ blob, filename })
             uploadSucceeded = true
           } catch (e) {

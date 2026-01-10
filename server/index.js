@@ -3,7 +3,8 @@ const cors = require('cors');
 const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('child_process')
+const { spawn, spawnSync } = require('child_process')
+const os = require('os')
 
 // Resolve a fetch implementation:
 // 1) prefer global fetch (Node 18+),
@@ -181,6 +182,60 @@ function setFileAnalysisState(fileEntry, { status, message }) {
   fileEntry.analysis.updatedAt = new Date().toISOString()
 }
 
+// ---- Background evaluation queue (limits concurrent Whisper/LLM under load) ---
+const MAX_CONCURRENT_ANALYSIS = Math.max(1, Number(process.env.MAX_CONCURRENT_ANALYSIS || 2))
+const analysisQueue = []
+let analysisRunning = 0
+
+function enqueueAnalysisJob(fn) {
+  return new Promise((resolve, reject) => {
+    analysisQueue.push({ fn, resolve, reject })
+    drainAnalysisQueue()
+  })
+}
+
+function drainAnalysisQueue() {
+  while (analysisRunning < MAX_CONCURRENT_ANALYSIS && analysisQueue.length) {
+    const job = analysisQueue.shift()
+    analysisRunning += 1
+    ;(async () => {
+      try {
+        const r = await job.fn()
+        job.resolve(r)
+      } catch (e) {
+        job.reject(e)
+      } finally {
+        analysisRunning -= 1
+        setImmediate(drainAnalysisQueue)
+      }
+    })()
+  }
+}
+
+async function extractAudioForWhisper(inputPath) {
+  // Use ffmpeg to extract a mono 16k WAV. Whisper is more reliable with plain audio than with arbitrary video containers.
+  if (!isFfmpegLikelyAvailable()) return { ok: false, skipped: true, path: '' }
+  const tmpDir = path.join(os.tmpdir(), 'interview-audio')
+  try { fs.mkdirSync(tmpDir, { recursive: true }) } catch (e) {}
+
+  const outPath = path.join(tmpDir, `audio-${Date.now()}-${Math.random().toString(16).slice(2)}.wav`)
+  try {
+    await runFfmpeg([
+      '-y',
+      '-i', inputPath,
+      '-vn',
+      '-ac', '1',
+      '-ar', '16000',
+      '-c:a', 'pcm_s16le',
+      outPath,
+    ])
+    return { ok: true, path: outPath }
+  } catch (e) {
+    try { if (fs.existsSync(outPath)) fs.unlinkSync(outPath) } catch (err) {}
+    return { ok: false, error: e?.message || String(e), path: '' }
+  }
+}
+
 async function gradeInterviewAnswers({ questions, transcriptText, stack }) {
   const qs = normalizeQuestionsArray(questions)
   if (!qs.length) {
@@ -258,9 +313,42 @@ async function analyzeAndGradeRecording({ absFilePath, fileEntry, session }) {
     }
 
     setFileAnalysisState(fileEntry, { status: 'pending', message: 'Evaluating answers…' })
-    const tr = await transcribeFile(absFilePath)
+
+    // Prefer extracting audio for Whisper (more reliable than uploading video containers).
+    let tr = { text: '', error: '' }
+    let extractedPath = ''
+    try {
+      const ex = await extractAudioForWhisper(absFilePath)
+      if (ex && ex.ok && ex.path) {
+        extractedPath = ex.path
+        tr = await transcribeFile(ex.path)
+      } else {
+        tr = await transcribeFile(absFilePath)
+      }
+    } finally {
+      if (extractedPath) {
+        try { fs.unlinkSync(extractedPath) } catch (e) {}
+      }
+    }
+
     if (!tr.text) {
-      setFileAnalysisState(fileEntry, { status: 'error', message: tr.error || 'Transcription failed.' })
+      // Don't hard-fail the whole session; store a "no speech" evaluation so the admin UI is stable.
+      const msg = tr.error || 'Transcription failed.'
+      const isEmpty = String(msg).toLowerCase().includes('empty transcript')
+      if (isEmpty) {
+        fileEntry.analysis = fileEntry.analysis || {}
+        fileEntry.analysis.status = 'done'
+        fileEntry.analysis.message = 'No audible speech detected; evaluation skipped.'
+        fileEntry.analysis.updatedAt = new Date().toISOString()
+        fileEntry.analysis.results = {
+          overallPercent: 0,
+          perQuestion: questions.map((q, i) => ({ index: i + 1, question: q, percent: 0, feedback: 'No clear answer detected (audio may be silent/unavailable).' })),
+          notes: msg,
+        }
+        return
+      }
+
+      setFileAnalysisState(fileEntry, { status: 'error', message: msg })
       return
     }
 
@@ -348,9 +436,39 @@ function toAbsoluteUrl(req, maybeRelativeUrl) {
 function isFfmpegLikelyAvailable() {
   // Allow explicitly disabling in environments where spawn is restricted.
   if (String(process.env.ENABLE_FFMPEG || '').toLowerCase() === 'false') return false
-  // If explicitly enabled, try anyway.
-  // Otherwise, do a lightweight best-effort check when the feature is used.
+  // Cache the detection result so we don't repeatedly spawn ffmpeg when it's not installed.
+  if (typeof FFMPEG_AVAILABLE === 'boolean') return FFMPEG_AVAILABLE
+  // Default to "unknown" until we run a probe.
   return true
+}
+
+let FFMPEG_AVAILABLE = null
+let FFMPEG_VERSION_LINE = ''
+function detectFfmpegAvailability() {
+  if (String(process.env.ENABLE_FFMPEG || '').toLowerCase() === 'false') {
+    FFMPEG_AVAILABLE = false
+    FFMPEG_VERSION_LINE = ''
+    return { available: false, disabled: true, versionLine: '' }
+  }
+
+  try {
+    const r = spawnSync('ffmpeg', ['-version'], { encoding: 'utf8' })
+    if (r && r.error) {
+      // ENOENT => not in PATH / not installed
+      FFMPEG_AVAILABLE = false
+      FFMPEG_VERSION_LINE = ''
+      return { available: false, disabled: false, versionLine: '', error: r.error }
+    }
+    const out = String(r?.stdout || r?.stderr || '').trim()
+    const firstLine = out.split(/\r?\n/).find(Boolean) || ''
+    FFMPEG_AVAILABLE = true
+    FFMPEG_VERSION_LINE = firstLine
+    return { available: true, disabled: false, versionLine: firstLine }
+  } catch (e) {
+    FFMPEG_AVAILABLE = false
+    FFMPEG_VERSION_LINE = ''
+    return { available: false, disabled: false, versionLine: '', error: e }
+  }
 }
 
 function runFfmpeg(args, { cwd } = {}) {
@@ -603,6 +721,14 @@ app.post(withBackendPrefix('/upload-answer'), upload.single('video'), (req, res)
   const file = req.file;
   const metadata = req.body.metadata ? (() => { try { return JSON.parse(req.body.metadata) } catch { return {} } })() : {};
   if (!file) return res.status(400).json({ error: 'No file uploaded' });
+  // Guard against empty/failed uploads which can later cause 416 range errors in the video player.
+  try {
+    const size = Number(file.size || 0)
+    if (!Number.isFinite(size) || size <= 1024) {
+      try { fs.unlinkSync(path.join(UPLOAD_DIR, file.filename)) } catch (e) {}
+      return res.status(400).json({ error: 'Uploaded file is empty or too small. Please retry recording/upload.' })
+    }
+  } catch (e) {}
 
   // Group uploads by sessionId so admin sees per-user sessions instead of per-chunk entries
   const sessionId = metadata.sessionId || `session-${Date.now()}`
@@ -696,7 +822,7 @@ app.post(withBackendPrefix('/upload-answer'), upload.single('video'), (req, res)
     // After saving, run evaluation asynchronously (no transcript persistence).
     ;(async () => {
       try {
-        await analyzeAndGradeRecording({ absFilePath: path.join(UPLOAD_DIR, file.filename), fileEntry, session })
+        await enqueueAnalysisJob(() => analyzeAndGradeRecording({ absFilePath: path.join(UPLOAD_DIR, file.filename), fileEntry, session }))
       } finally {
         try { fs.writeFileSync(RECORDS_FILE, JSON.stringify(records, null, 2)) } catch (e) {}
       }
@@ -745,9 +871,14 @@ app.post(withBackendPrefix('/upload-chunk'), upload.single('video'), (req, res) 
       const interview = interviews.find(i => i.id === metadata.interviewId)
       if (interview && interview.stack) session.metadata.stack = interview.stack
     }
+    // Avoid writing records.json on every chunk (major load under concurrency).
+    // Only persist if this is the first time we see the session OR if recordingActive wasn't set.
+    const wasRecordingActive = session.metadata.recordingActive === true
     session.metadata.recordingActive = true
-    session.metadata.lastChunkAt = new Date().toISOString()
-    fs.writeFileSync(RECORDS_FILE, JSON.stringify(records, null, 2))
+    if (!wasRecordingActive || session.name === 'Unknown') {
+      session.metadata.lastChunkAt = new Date().toISOString()
+      fs.writeFileSync(RECORDS_FILE, JSON.stringify(records, null, 2))
+    }
   } catch (e) {
     // ignore persistence errors
   }
@@ -806,6 +937,17 @@ async function assembleChunks(sessionId, name, interviewId, candidate) {
     }
     ws.end()
     await new Promise((resolve, reject) => { ws.on('finish', resolve); ws.on('error', reject) })
+  }
+  // Guard against creating empty output files (which can trigger 416 range errors and bad playback).
+  try {
+    const st = fs.statSync(outPath)
+    if (!st || !st.size || st.size <= 1024) {
+      try { fs.unlinkSync(outPath) } catch (e) {}
+      throw new Error('assembled file is empty (no usable media)')
+    }
+  } catch (e) {
+    if (e && e.message) throw e
+    throw new Error('assembled file is empty (no usable media)')
   }
 
   // create session entry and attach file
@@ -867,7 +1009,7 @@ async function assembleChunks(sessionId, name, interviewId, candidate) {
   // trigger transcription and assessment asynchronously
   ;(async () => {
     try {
-      await analyzeAndGradeRecording({ absFilePath: outPath, fileEntry, session })
+      await enqueueAnalysisJob(() => analyzeAndGradeRecording({ absFilePath: outPath, fileEntry, session }))
     } finally {
       try { fs.writeFileSync(RECORDS_FILE, JSON.stringify(records, null, 2)) } catch (e) {}
     }
@@ -1304,6 +1446,10 @@ app.use(['/uploads', '/backend/uploads'], express.static(UPLOAD_DIR))
 // before they reach Node. In that case, you must increase the proxy's max body size too.
 app.use((err, req, res, next) => {
   try {
+    // Video players frequently probe invalid/out-of-date ranges; avoid noisy stack traces.
+    if (err && (err.status === 416 || err.statusCode === 416)) {
+      return res.status(416).end()
+    }
     if (err && (err.code === 'LIMIT_FILE_SIZE' || err.status === 413)) {
       return res.status(413).json({
         error: 'Request Entity Too Large',
@@ -1314,7 +1460,27 @@ app.use((err, req, res, next) => {
   return next(err)
 })
 
+// Final catch-all error handler (prevents default Express handler from dumping stacks to stdout).
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err?.message || err)
+  try {
+    if (res.headersSent) return next(err)
+    return res.status(err?.status || 500).json({ error: err?.message || 'Server error' })
+  } catch (e) {
+    try { return res.end() } catch (e2) {}
+  }
+})
+
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
+  // Log ffmpeg status once at startup so operators can confirm whether the server is using it.
+  const ff = detectFfmpegAvailability()
+  if (ff.disabled) {
+    console.log('ffmpeg: disabled (ENABLE_FFMPEG=false)')
+  } else if (ff.available) {
+    console.log(`ffmpeg: detected (${ff.versionLine || 'version unknown'})`)
+  } else {
+    console.warn('ffmpeg: NOT found in PATH; running in fallback mode (install ffmpeg or add it to PATH).')
+  }
   console.log(`Server listening on http://localhost:${PORT}`);
 });
