@@ -854,6 +854,7 @@ app.post(withBackendPrefix('/upload-chunk'), upload.single('video'), async (req,
     const shouldPersist = !Number.isFinite(idxNum) || idxNum === 0 || (idxNum % 5 === 0)
     if (shouldPersist) {
       const questions = Array.isArray(metadata.questions) ? normalizeQuestionsArray(metadata.questions) : []
+      const kind = metadata.kind ? String(metadata.kind) : undefined
       let stackFromInterview = ''
       if (metadata.interviewId) {
         try {
@@ -873,6 +874,7 @@ app.post(withBackendPrefix('/upload-chunk'), upload.single('video'), async (req,
           phone: metadata.phone ? String(metadata.phone).trim() : undefined,
           source: metadata.source ? String(metadata.source).trim() : undefined,
           questions: questions.length ? questions : undefined,
+          kind,
           interviewId: metadata.interviewId || undefined,
           stack: stackFromInterview || undefined,
           recordingActive: true,
@@ -951,6 +953,8 @@ async function assembleChunks(sessionId, name, interviewId, candidate) {
 
   const nowIso = new Date().toISOString()
   const questions = Array.isArray(candidate?.questions) ? normalizeQuestionsArray(candidate.questions) : []
+  const kind = candidate?.kind ? String(candidate.kind).toLowerCase() : ''
+  const sourceKind = kind || 'camera'
   let stackFromInterview = ''
   if (interviewId) {
     try {
@@ -961,7 +965,7 @@ async function assembleChunks(sessionId, name, interviewId, candidate) {
   }
 
   // Mark as finalized after assembly
-  const fileEntry = { id: Date.now().toString(), filename: outName, path: `/uploads/${outName}`, question: null, index: null, source: 'camera', uploadedAt: nowIso }
+  const fileEntry = { id: Date.now().toString(), filename: outName, path: `/uploads/${outName}`, question: null, index: null, source: sourceKind, uploadedAt: nowIso }
   if (!OPENAI_KEY) setFileAnalysisState(fileEntry, { status: 'unavailable', message: 'OpenAI not configured (set OPENAI_API_KEY).' })
   else setFileAnalysisState(fileEntry, { status: 'pending', message: 'Evaluation pending…' })
 
@@ -1017,20 +1021,21 @@ async function assembleChunks(sessionId, name, interviewId, candidate) {
 
 // POST /upload-complete (explicit finalization)
 app.post(withBackendPrefix('/upload-complete'), express.json(), async (req, res) => {
-  const { sessionId, name, interviewId, email, country, phone, source, questions } = req.body || {}
+  const { sessionId, name, interviewId, email, country, phone, source, questions, kind, force } = req.body || {}
   if (!sessionId) return res.status(400).json({ error: 'sessionId required' })
 
   // Guard: don't assemble while the candidate is still recording.
   // Some browsers fire visibility/unload events mid-recording; without this, we'd create partial files.
   try {
     const session = await db.getSession(sessionId)
-    if (session?.metadata?.recordingActive === true) {
+    const isForce = String(force || '').toLowerCase() === 'true' || String(force || '') === '1'
+    if (!isForce && session?.metadata?.recordingActive === true) {
       return res.status(409).json({ error: 'Recording still in progress. Please try again after recording stops.' })
     }
   } catch (e) {}
 
   try {
-    const fileEntry = await assembleChunks(sessionId, name, interviewId, { email, country, phone, source, questions })
+    const fileEntry = await assembleChunks(sessionId, name, interviewId, { email, country, phone, source, questions, kind })
     return res.json({ ok: true, sessionId, file: fileEntry })
   } catch (err) {
     console.error('upload-complete failed', err.message || err)
@@ -1073,7 +1078,7 @@ app.get(withBackendPrefix('/upload-complete-beacon'), (req, res) => {
 
 // Accept POST beacons too (navigator.sendBeacon will POST a small payload)
 app.post(withBackendPrefix('/upload-complete-beacon'), express.json(), async (req, res) => {
-  const { sessionId, name, interviewId, email, country, phone, source, force, questions } = req.body || {}
+  const { sessionId, name, interviewId, email, country, phone, source, force, questions, kind } = req.body || {}
   if (!sessionId) return res.status(400).json({ error: 'sessionId required' })
 
   // Guard: don't assemble while recording is active. Just accept the beacon and no-op.
@@ -1084,7 +1089,7 @@ app.post(withBackendPrefix('/upload-complete-beacon'), express.json(), async (re
     }
   } catch (e) {}
 
-  assembleChunks(sessionId, name, interviewId, { email, country, phone, source, questions }).then(file => {
+  assembleChunks(sessionId, name, interviewId, { email, country, phone, source, questions, kind }).then(file => {
     console.log('Beacon (POST) assembled session', sessionId, '->', file.filename)
   }).catch(err => {
     if ((err && err.message) === 'no chunks found') {
@@ -1132,7 +1137,27 @@ setInterval(() => {
         // if no chunk activity for 30 seconds, attempt assembly
         if (now - latest > 30_000) {
           console.log('Background assembler: assembling stale session', sid)
-          assembleChunks(sid)
+          ;(async () => {
+            try {
+              const s = await db.getSession(sid)
+              const meta = s?.metadata || {}
+              return assembleChunks(
+                sid,
+                s?.name || 'Unknown',
+                meta.interviewId,
+                {
+                  email: meta.email,
+                  country: meta.country,
+                  phone: meta.phone,
+                  source: meta.source,
+                  questions: meta.questions,
+                  kind: meta.kind,
+                }
+              )
+            } catch (e) {
+              return assembleChunks(sid)
+            }
+          })()
             .then(f => console.log('Background assembled', sid, f && f.filename))
             .catch(e => {
               if ((e && e.message) === 'no chunks found') return

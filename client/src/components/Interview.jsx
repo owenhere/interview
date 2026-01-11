@@ -172,7 +172,7 @@ export default function Interview({ name, email, country, phone, interviewId, st
         if (completedRef.current) return
         if (recorderRef.current && recorderRef.current.state !== 'inactive') return
         const url = `${API_BASE}/upload-complete-beacon`
-        const payload = JSON.stringify({ sessionId: sessionIdRef.current, name, email, country, phone, interviewId, source: refSource, questions: questionsRef.current })
+        const payload = JSON.stringify({ sessionId: sessionIdRef.current, name, email, country, phone, interviewId, source: refSource, questions: questionsRef.current, kind: 'screen_pip' })
         if (navigator.sendBeacon) {
           const blob = new Blob([payload], { type: 'application/json' })
           navigator.sendBeacon(url, blob)
@@ -195,7 +195,7 @@ export default function Interview({ name, email, country, phone, interviewId, st
         // On unload we want best-effort finalization of chunks already uploaded.
         // Use `force:true` so the server assembles even if recordingActive is still true.
         const url = `${API_BASE}/upload-complete-beacon`
-        const payload = JSON.stringify({ sessionId: sessionIdRef.current, name, email, country, phone, interviewId, source: refSource, force: true, questions: questionsRef.current })
+        const payload = JSON.stringify({ sessionId: sessionIdRef.current, name, email, country, phone, interviewId, source: refSource, force: true, questions: questionsRef.current, kind: 'screen_pip' })
         if (navigator.sendBeacon) {
           const blob = new Blob([payload], { type: 'application/json' })
           navigator.sendBeacon(url, blob)
@@ -481,8 +481,15 @@ export default function Interview({ name, email, country, phone, interviewId, st
       const smr = await startScreenRecorderWithCameraPip({ displayStream: display, cameraStream: stream })
       screenRecorderRef.current = smr
       screenStoppedPromiseRef.current = new Promise((resolve) => { screenStoppedResolveRef.current = resolve })
+      let screenChunkIndex = 0
       smr.ondataavailable = (e) => {
-        if (e.data && e.data.size) screenChunksRef.current.push(e.data)
+        if (e.data && e.data.size) {
+          screenChunksRef.current.push(e.data)
+          const thisIndex = screenChunkIndex++
+          hasChunkRef.current = true
+          // Upload screen_pip chunks sequentially to avoid flooding the network.
+          uploadQueueRef.current = uploadQueueRef.current.then(() => uploadScreenChunk({ mr: smr, blob: e.data, index: thisIndex }))
+        }
       }
       smr.onstop = () => {
         try { if (screenStoppedResolveRef.current) screenStoppedResolveRef.current() } catch (e) {}
@@ -514,30 +521,35 @@ export default function Interview({ name, email, country, phone, interviewId, st
     }
   }
 
-  const uploadFinal = async ({ kind, mr, chunks }) => {
-    const mimeType = (mr && mr.mimeType) ? mr.mimeType : 'video/webm'
-    const blob = new Blob(chunks || [], { type: mimeType })
+  const uploadScreenChunk = async ({ mr, blob, index }) => {
     const fd = new FormData()
-    const ext = mimeType.includes('mp4') ? 'mp4' : 'webm'
-    const filename = `${sessionIdRef.current || 'session'}-${kind}-${Date.now()}.${ext}`
+    const ext = (mr?.mimeType || '').includes('mp4') ? 'mp4' : 'webm'
+    const filename = `${sessionIdRef.current || 'session'}-screen_pip-chunk-${Date.now()}.${ext}`
     fd.append('video', blob, filename)
-    fd.append('metadata', JSON.stringify({ sessionId: sessionIdRef.current, name, email, country, phone, interviewId, source: refSource, questions: questionsRef.current, kind }))
-    // Retry final upload a couple times for transient server load / network blips.
-    let lastErr = null
-    for (let attempt = 0; attempt < 3; attempt++) {
+    fd.append('metadata', JSON.stringify({
+      sessionId: sessionIdRef.current,
+      index,
+      interviewId,
+      name,
+      email,
+      country,
+      phone,
+      source: refSource,
+      questions: questionsRef.current,
+      kind: 'screen_pip',
+    }))
+    // small retry
+    for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const resp = await fetch(`${API_BASE}/upload-answer`, { method: 'POST', body: fd })
+        const resp = await fetch(`${API_BASE}/upload-chunk`, { method: 'POST', body: fd })
         try { await resp.json() } catch (e) {}
-        if (!resp.ok) throw new Error(`upload-answer failed (${resp.status})`)
-        lastErr = null
-        break
-      } catch (err) {
-        lastErr = err
-        await new Promise(r => setTimeout(r, 600 * (attempt + 1)))
+        if (!resp.ok) throw new Error(`upload-chunk failed (${resp.status})`)
+        return
+      } catch (e) {
+        if (attempt === 1) throw e
+        await new Promise(r => setTimeout(r, 500 * (attempt + 1)))
       }
     }
-    if (lastErr) throw lastErr
-    return { ok: true, blob, filename }
   }
 
   const stopRecording = async () => {
@@ -570,11 +582,30 @@ export default function Interview({ name, email, country, phone, interviewId, st
       if (!screenRecorderRef.current || !screenChunksRef.current.length) {
         throw new Error('No screen recording captured.')
       }
-      const r = await uploadFinal({ kind: 'screen_pip', mr: screenRecorderRef.current, chunks: screenChunksRef.current })
-      setLastRecording({ blob: r.blob, filename: r.filename })
-      ok = true
+      // Ensure all pending chunk uploads are flushed before finalization.
+      try { await uploadQueueRef.current } catch (e) {}
+
+      const mimeType = (screenRecorderRef.current && screenRecorderRef.current.mimeType) ? screenRecorderRef.current.mimeType : 'video/webm'
+      const blob = new Blob(screenChunksRef.current, { type: mimeType })
+      const ext = mimeType.includes('mp4') ? 'mp4' : 'webm'
+      const filename = `${sessionIdRef.current || 'session'}-screen_pip-${Date.now()}.${ext}`
+      setLastRecording({ blob, filename })
+
+      const r = await finalizeUpload({
+        sessionId: sessionIdRef.current,
+        name,
+        email,
+        country,
+        phone,
+        interviewId,
+        source: refSource,
+        questions: questionsRef.current,
+        kind: 'screen_pip',
+        force: true,
+      })
+      ok = !!(r && r.ok)
     } catch (e) {
-      console.warn('upload-answer (screen_pip) failed', e)
+      console.warn('finalize (screen_pip) failed', e)
       ok = false
     }
 
