@@ -376,8 +376,13 @@ export default function Interview({ name, email, country, phone, interviewId, st
     try { await camVideo.play() } catch (e) {}
 
     const screenSettings = screenTrack.getSettings ? screenTrack.getSettings() : {}
-    const width = Math.max(640, Number(screenSettings.width) || 1280)
-    const height = Math.max(360, Number(screenSettings.height) || 720)
+    const srcW = Math.max(640, Number(screenSettings.width) || 1280)
+    const srcH = Math.max(360, Number(screenSettings.height) || 720)
+    // Reduce upload sizes by downscaling the composed output (helps avoid 413 at proxies).
+    const MAX_W = 1280
+    const scale = srcW > MAX_W ? (MAX_W / srcW) : 1
+    const width = Math.round(srcW * scale)
+    const height = Math.round(srcH * scale)
 
     const canvas = document.createElement('canvas')
     canvas.width = width
@@ -417,7 +422,8 @@ export default function Interview({ name, email, country, phone, interviewId, st
     }
     pipRafRef.current = requestAnimationFrame(draw)
 
-    const outStream = canvas.captureStream(30)
+    // Lower FPS reduces bitrate and chunk sizes.
+    const outStream = canvas.captureStream(20)
     // Prefer mic audio for interview audio
     const mic = cameraStream.getAudioTracks && cameraStream.getAudioTracks()[0]
     if (mic) outStream.addTrack(mic)
@@ -425,7 +431,8 @@ export default function Interview({ name, email, country, phone, interviewId, st
     const screenPreferred = pickBestMimeType()
     const screenOptions = {
       mimeType: screenPreferred,
-      videoBitsPerSecond: 1_400_000,
+      // Lower bitrate to keep chunks under common proxy limits.
+      videoBitsPerSecond: 850_000,
       audioBitsPerSecond: 64_000,
     }
 
@@ -512,7 +519,8 @@ export default function Interview({ name, email, country, phone, interviewId, st
     }
     // Smaller timeslice => smaller chunks (helps avoid 413 from proxies with small body limits).
     try {
-      try { if (screenRecorderRef.current) screenRecorderRef.current.start(2000) } catch (e) {}
+      // Smaller timeslice => smaller chunks (helps avoid 413 from proxies with small body limits).
+      try { if (screenRecorderRef.current) screenRecorderRef.current.start(1000) } catch (e) {}
       setRecording(true)
     } catch (e) {
       console.warn('MediaRecorder start failed', e)
