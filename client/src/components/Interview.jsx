@@ -55,6 +55,8 @@ export default function Interview({ name, email, country, phone, interviewId, st
   const [lastRecording, setLastRecording] = useState(null) // { blob, filename }
   const [uploading, setUploading] = useState(false)
   const [uploadError, setUploadError] = useState('')
+  const [blocked, setBlocked] = useState(false)
+  const [blockedMessage, setBlockedMessage] = useState('')
   const [thankYouOpen, setThankYouOpen] = useState(false)
   const [speaking, setSpeaking] = useState(false)
   const [voiceLevel, setVoiceLevel] = useState(0)
@@ -85,6 +87,13 @@ export default function Interview({ name, email, country, phone, interviewId, st
   const recordingRef = useRef(false)
   const uploadingRef = useRef(false)
   const completedRef = useRef(false)
+
+  const blockInterview = (msg) => {
+    setBlocked(true)
+    setBlockedMessage(msg || 'Camera and screen permissions are required to take this interview. Please reload and allow permissions.')
+    setUploadError(msg || 'Camera and screen permissions are required to take this interview. Please reload and allow permissions.')
+    try { localStorage.setItem('interview_locked', 'true') } catch (e) {}
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -299,24 +308,41 @@ export default function Interview({ name, email, country, phone, interviewId, st
       return stream
     } catch (err) {
       console.warn('Could not access camera/microphone', err)
+      // If user explicitly denied permissions, hard-block the interview.
+      const name = String(err?.name || '').toLowerCase()
+      const msg = String(err?.message || '').toLowerCase()
+      if (name.includes('notallowed') || msg.includes('denied') || msg.includes('permission')) {
+        blockInterview('Camera/Microphone permission is required. Please reload the page and click "Allow".')
+      }
       return null
     }
   }
 
   const startDisplayStreamRequireMonitor = async () => {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+      blockInterview('Screen sharing is required. Please use a browser/device that supports screen sharing.')
       throw new Error('Screen sharing is not supported in this browser.')
     }
 
     for (let attempt = 0; attempt < 3; attempt++) {
-      const display = await navigator.mediaDevices.getDisplayMedia({
-        video: {
-          frameRate: { ideal: 30, max: 30 },
-          // best-effort hint; browsers may ignore
-          displaySurface: 'monitor',
-        },
-        audio: false,
-      })
+      let display
+      try {
+        display = await navigator.mediaDevices.getDisplayMedia({
+          video: {
+            frameRate: { ideal: 30, max: 30 },
+            // best-effort hint; browsers may ignore
+            displaySurface: 'monitor',
+          },
+          audio: false,
+        })
+      } catch (err) {
+        const name = String(err?.name || '').toLowerCase()
+        const msg = String(err?.message || '').toLowerCase()
+        if (name.includes('notallowed') || msg.includes('denied') || msg.includes('permission')) {
+          blockInterview('Screen sharing permission is required. Please reload the page and click "Allow".')
+        }
+        throw err
+      }
 
       const vt = display.getVideoTracks()[0]
       const surface = vt && vt.getSettings ? vt.getSettings().displaySurface : ''
@@ -408,6 +434,7 @@ export default function Interview({ name, email, country, phone, interviewId, st
   }
 
   const startRecording = async () => {
+    if (blocked) return
     // Reset auto-stop guard for a new recording.
     autoStopTriggeredRef.current = false
     stopReasonRef.current = null
@@ -416,7 +443,7 @@ export default function Interview({ name, email, country, phone, interviewId, st
     if (!stream) stream = await startCamera()
     if (!stream) {
       // Most commonly: user denied permissions or browser blocked prompt.
-      setUploadError('Please allow camera & microphone access, then try again.')
+      if (!blocked) setUploadError('Please allow camera & microphone access, then try again.')
       setRecording(false)
       return
     }
@@ -427,7 +454,7 @@ export default function Interview({ name, email, country, phone, interviewId, st
       setUploadError('')
       display = await startDisplayStreamRequireMonitor()
     } catch (e) {
-      setUploadError(e?.message || 'Screen sharing is required to start the interview.')
+      if (!blocked) setUploadError(e?.message || 'Screen sharing is required to start the interview.')
       setRecording(false)
       return
     }
@@ -514,6 +541,7 @@ export default function Interview({ name, email, country, phone, interviewId, st
   }
 
   const stopRecording = async () => {
+    if (blocked) return
     // Mark explicit user stop (unless already timeout).
     stopReasonRef.current = stopReasonRef.current || 'user'
     stopVoiceDetection()
@@ -702,6 +730,7 @@ export default function Interview({ name, email, country, phone, interviewId, st
                     size="large"
                     block
                     onClick={startRecording}
+                    disabled={blocked}
                   >
                   Start Interview
                   </Button>
@@ -714,6 +743,7 @@ export default function Interview({ name, email, country, phone, interviewId, st
                     size="large"
                     block
                     onClick={stopRecording}
+                    disabled={blocked}
                   >
                    Finish Interview
                   </Button>
@@ -740,8 +770,17 @@ export default function Interview({ name, email, country, phone, interviewId, st
                   style={{ width: `${Math.round(((index + 1) / questions.length) * 100)}%` }}
                 />
               </div>
-              {!recording && uploadError && (
-                <div className="muted" style={{ marginTop: 10, color: '#ef4444' }}>{uploadError}</div>
+              {!recording && (uploadError || blockedMessage) && (
+                <div className="muted" style={{ marginTop: 10, color: '#ef4444' }}>
+                  {blocked ? (blockedMessage || uploadError) : uploadError}
+                  {blocked ? (
+                    <div style={{ marginTop: 6 }}>
+                      <Button size="small" onClick={() => window.location.reload()}>
+                        Reload
+                      </Button>
+                    </div>
+                  ) : null}
+                </div>
               )}
             </Card>
           </section>
