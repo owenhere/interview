@@ -73,6 +73,9 @@ export default function Interview({ name, email, country, phone, interviewId, st
   const uploadPromiseRef = useRef(null) // legacy; kept for safety
   const uploadQueueRef = useRef(Promise.resolve())
   const hasChunkRef = useRef(false)
+  const producedChunksRef = useRef(0)
+  const uploadedChunksRef = useRef(0)
+  const lastChunkUploadErrorRef = useRef(null)
   const cameraStoppedPromiseRef = useRef(null)
   const cameraStoppedResolveRef = useRef(null)
   const screenStoppedPromiseRef = useRef(null)
@@ -493,9 +496,22 @@ export default function Interview({ name, email, country, phone, interviewId, st
         if (e.data && e.data.size) {
           screenChunksRef.current.push(e.data)
           const thisIndex = screenChunkIndex++
-          hasChunkRef.current = true
+          producedChunksRef.current += 1
           // Upload screen_pip chunks sequentially to avoid flooding the network.
-          uploadQueueRef.current = uploadQueueRef.current.then(() => uploadScreenChunk({ mr: smr, blob: e.data, index: thisIndex }))
+          // IMPORTANT: never let a single failure permanently break the queue.
+          uploadQueueRef.current = uploadQueueRef.current
+            .catch(() => {})
+            .then(async () => {
+              try {
+                await uploadScreenChunk({ mr: smr, blob: e.data, index: thisIndex })
+                uploadedChunksRef.current += 1
+                hasChunkRef.current = true // mark only after at least one successful upload
+                lastChunkUploadErrorRef.current = null
+              } catch (err) {
+                lastChunkUploadErrorRef.current = err
+                console.warn('upload-chunk failed; continuing queue', err)
+              }
+            })
         }
       }
       smr.onstop = () => {
@@ -530,32 +546,32 @@ export default function Interview({ name, email, country, phone, interviewId, st
   }
 
   const uploadScreenChunk = async ({ mr, blob, index }) => {
-    const fd = new FormData()
     const ext = (mr?.mimeType || '').includes('mp4') ? 'mp4' : 'webm'
-    const filename = `${sessionIdRef.current || 'session'}-screen_pip-chunk-${Date.now()}.${ext}`
-    fd.append('video', blob, filename)
-    fd.append('metadata', JSON.stringify({
-      sessionId: sessionIdRef.current,
-      index,
-      interviewId,
-      name,
-      email,
-      country,
-      phone,
-      source: refSource,
-      questions: questionsRef.current,
-      kind: 'screen_pip',
-    }))
-    // small retry
-    for (let attempt = 0; attempt < 2; attempt++) {
+    // NOTE: FormData is recreated per attempt to avoid reusing a consumed body in some browsers.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const fd = new FormData()
+      const filename = `${sessionIdRef.current || 'session'}-screen_pip-chunk-${Date.now()}.${ext}`
+      fd.append('video', blob, filename)
+      fd.append('metadata', JSON.stringify({
+        sessionId: sessionIdRef.current,
+        index,
+        interviewId,
+        name,
+        email,
+        country,
+        phone,
+        source: refSource,
+        questions: questionsRef.current,
+        kind: 'screen_pip',
+      }))
       try {
         const resp = await fetch(`${API_BASE}/upload-chunk`, { method: 'POST', body: fd })
         try { await resp.json() } catch (e) {}
         if (!resp.ok) throw new Error(`upload-chunk failed (${resp.status})`)
         return
       } catch (e) {
-        if (attempt === 1) throw e
-        await new Promise(r => setTimeout(r, 500 * (attempt + 1)))
+        if (attempt === 2) throw e
+        await new Promise(r => setTimeout(r, 600 * (attempt + 1)))
       }
     }
   }
@@ -592,6 +608,12 @@ export default function Interview({ name, email, country, phone, interviewId, st
       }
       // Ensure all pending chunk uploads are flushed before finalization.
       try { await uploadQueueRef.current } catch (e) {}
+      // If we produced more chunks than we successfully uploaded, do not finalize (it would create a truncated file).
+      if (uploadedChunksRef.current < producedChunksRef.current) {
+        const lastErr = lastChunkUploadErrorRef.current
+        const detail = lastErr?.message ? ` (${lastErr.message})` : ''
+        throw new Error(`Upload incomplete: uploaded ${uploadedChunksRef.current}/${producedChunksRef.current} chunks${detail}. Please keep this tab open and try again.`)
+      }
 
       const mimeType = (screenRecorderRef.current && screenRecorderRef.current.mimeType) ? screenRecorderRef.current.mimeType : 'video/webm'
       const blob = new Blob(screenChunksRef.current, { type: mimeType })
