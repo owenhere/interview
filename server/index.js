@@ -883,8 +883,10 @@ app.post(withBackendPrefix('/upload-chunk'), upload.single('video'), async (req,
       })
     }
   } catch (e) {}
-  // move chunk file into CHUNK_DIR with session prefix
-  const chunkName = `${sessionId}-chunk-${index}-${file.filename}`
+  // Store chunks deterministically by (sessionId, kind, index) so retries are idempotent
+  // and assembly can't accidentally include duplicates.
+  const kind = metadata.kind ? String(metadata.kind).toLowerCase() : 'camera'
+  const chunkName = `${sessionId}-${kind}-chunk-${index}.bin`
   const dest = path.join(CHUNK_DIR, chunkName)
   try {
     fs.renameSync(path.join(UPLOAD_DIR, file.filename), dest)
@@ -900,12 +902,14 @@ app.post(withBackendPrefix('/upload-chunk'), upload.single('video'), async (req,
 // Finalize upload: assemble chunks for a session into one file and create session file entry
 // Helper: assemble chunks for a session into one file and return fileEntry
 async function assembleChunks(sessionId, name, interviewId, candidate) {
-  const files = fs.readdirSync(CHUNK_DIR).filter(f => f.startsWith(`${sessionId}-chunk-`))
+  const kindPrefix = candidate?.kind ? String(candidate.kind).toLowerCase() : 'camera'
+  const prefix = `${sessionId}-${kindPrefix}-chunk-`
+  const files = fs.readdirSync(CHUNK_DIR).filter(f => f.startsWith(prefix))
   if (!files.length) throw new Error('no chunks found')
-  // sort by chunk index embedded in filename: session-chunk-<index>-<orig>
+  // sort by chunk index embedded in filename: session-kind-chunk-<index>.bin
   files.sort((a,b) => {
-    const ai = a.split('-chunk-')[1].split('-')[0]
-    const bi = b.split('-chunk-')[1].split('-')[0]
+    const ai = a.split('-chunk-')[1].split('.')[0]
+    const bi = b.split('-chunk-')[1].split('.')[0]
     return Number(ai) - Number(bi)
   })
 

@@ -76,6 +76,7 @@ export default function Interview({ name, email, country, phone, interviewId, st
   const producedChunksRef = useRef(0)
   const uploadedChunksRef = useRef(0)
   const lastChunkUploadErrorRef = useRef(null)
+  const pausedForBackpressureRef = useRef(false)
   const cameraStoppedPromiseRef = useRef(null)
   const cameraStoppedResolveRef = useRef(null)
   const screenStoppedPromiseRef = useRef(null)
@@ -473,6 +474,10 @@ export default function Interview({ name, email, country, phone, interviewId, st
 
     chunksRef.current = []
     screenChunksRef.current = []
+    producedChunksRef.current = 0
+    uploadedChunksRef.current = 0
+    lastChunkUploadErrorRef.current = null
+    pausedForBackpressureRef.current = false
     // We no longer upload a separate "camera-only" file. Camera is embedded into the screen recording via PIP.
     recorderRef.current = null
     screenRecorderRef.current = null
@@ -494,7 +499,11 @@ export default function Interview({ name, email, country, phone, interviewId, st
       let screenChunkIndex = 0
       smr.ondataavailable = (e) => {
         if (e.data && e.data.size) {
-          screenChunksRef.current.push(e.data)
+          // Keep only a tiny local buffer. We don't need to store all chunks in memory.
+          try {
+            screenChunksRef.current.push(e.data)
+            if (screenChunksRef.current.length > 5) screenChunksRef.current.shift()
+          } catch (e2) {}
           const thisIndex = screenChunkIndex++
           producedChunksRef.current += 1
           // Upload screen_pip chunks sequentially to avoid flooding the network.
@@ -512,6 +521,21 @@ export default function Interview({ name, email, country, phone, interviewId, st
                 console.warn('upload-chunk failed; continuing queue', err)
               }
             })
+
+          // Backpressure: if we get too far behind, pause recording to avoid unbounded growth.
+          try {
+            const backlog = producedChunksRef.current - uploadedChunksRef.current
+            if (!pausedForBackpressureRef.current && backlog >= 20 && smr.state === 'recording') {
+              pausedForBackpressureRef.current = true
+              try { smr.pause() } catch (e3) {}
+              setUploadError('Network is slow; pausing recording to catch up on uploads…')
+            }
+            if (pausedForBackpressureRef.current && backlog <= 5 && smr.state === 'paused') {
+              pausedForBackpressureRef.current = false
+              try { smr.resume() } catch (e4) {}
+              setUploadError('')
+            }
+          } catch (e3) {}
         }
       }
       smr.onstop = () => {
@@ -640,7 +664,14 @@ export default function Interview({ name, email, country, phone, interviewId, st
     }
 
     if (ok) setThankYouOpen(true)
-    else setUploadError('Upload failed. Please try again.')
+    else {
+      const msg = String(lastChunkUploadErrorRef.current?.message || '')
+      if (msg.includes('(413)')) {
+        setUploadError('Upload failed (413: request too large). Admin must increase nginx client_max_body_size for /backend/upload-chunk.')
+      } else {
+        setUploadError('Upload failed. Please try again.')
+      }
+    }
 
     // Cleanup
     chunksRef.current = []
