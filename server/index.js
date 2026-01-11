@@ -846,6 +846,8 @@ app.post(withBackendPrefix('/upload-chunk'), upload.single('video'), async (req,
   const sessionId = metadata.sessionId || `session-${Date.now()}`
   // preserve index 0 (don't treat 0 as falsy) — use undefined check
   const index = (typeof metadata.index !== 'undefined' && metadata.index !== null) ? metadata.index : Date.now()
+  const part = (typeof metadata.part !== 'undefined' && metadata.part !== null) ? Number(metadata.part) : 0
+  const partCount = (typeof metadata.partCount !== 'undefined' && metadata.partCount !== null) ? Number(metadata.partCount) : 1
   console.log('Received /upload-chunk:', { orig: file.originalname, stored: file.filename, metadata, sessionId, index })
 
   // Persist session metadata early (Postgres). To reduce write load, only update on the first chunk and periodically.
@@ -886,7 +888,9 @@ app.post(withBackendPrefix('/upload-chunk'), upload.single('video'), async (req,
   // Store chunks deterministically by (sessionId, kind, index) so retries are idempotent
   // and assembly can't accidentally include duplicates.
   const kind = metadata.kind ? String(metadata.kind).toLowerCase() : 'camera'
-  const chunkName = `${sessionId}-${kind}-chunk-${index}.bin`
+  // Store per-part deterministically as (sessionId, kind, index, part) so retries overwrite safely.
+  // Even when partCount=1 we still store with -part-0 for simplicity.
+  const chunkName = `${sessionId}-${kind}-chunk-${index}-part-${Number.isFinite(part) ? part : 0}.bin`
   const dest = path.join(CHUNK_DIR, chunkName)
   try {
     fs.renameSync(path.join(UPLOAD_DIR, file.filename), dest)
@@ -896,7 +900,7 @@ app.post(withBackendPrefix('/upload-chunk'), upload.single('video'), async (req,
     fs.copyFileSync(path.join(UPLOAD_DIR, file.filename), dest)
     try { fs.unlinkSync(path.join(UPLOAD_DIR, file.filename)) } catch (e) {}
   }
-  return res.json({ ok: true, chunk: chunkName, sessionId })
+  return res.json({ ok: true, chunk: chunkName, sessionId, index, part, partCount })
 })
 
 // Finalize upload: assemble chunks for a session into one file and create session file entry
@@ -906,11 +910,17 @@ async function assembleChunks(sessionId, name, interviewId, candidate) {
   const prefix = `${sessionId}-${kindPrefix}-chunk-`
   const files = fs.readdirSync(CHUNK_DIR).filter(f => f.startsWith(prefix))
   if (!files.length) throw new Error('no chunks found')
-  // sort by chunk index embedded in filename: session-kind-chunk-<index>.bin
+  // sort by chunk index and part index embedded in filename:
+  // session-kind-chunk-<index>-part-<part>.bin
   files.sort((a,b) => {
-    const ai = a.split('-chunk-')[1].split('.')[0]
-    const bi = b.split('-chunk-')[1].split('.')[0]
-    return Number(ai) - Number(bi)
+    const am = a.match(/-chunk-(\d+)(?:-part-(\d+))?\.bin$/)
+    const bm = b.match(/-chunk-(\d+)(?:-part-(\d+))?\.bin$/)
+    const ai = am ? Number(am[1]) : Number.POSITIVE_INFINITY
+    const bi = bm ? Number(bm[1]) : Number.POSITIVE_INFINITY
+    if (ai !== bi) return ai - bi
+    const ap = (am && typeof am[2] !== 'undefined') ? Number(am[2]) : 0
+    const bp = (bm && typeof bm[2] !== 'undefined') ? Number(bm[2]) : 0
+    return ap - bp
   })
 
   const chunkPaths = files.map(f => path.join(CHUNK_DIR, f))

@@ -221,6 +221,27 @@ export default function Interview({ name, email, country, phone, interviewId, st
     }
   }, [name])
 
+  // IMPORTANT: when the tab is backgrounded (alt-tab / switch windows), browsers may throttle timers and
+  // MediaRecorder can batch data into a single huge blob.
+  // We MUST keep recording (to detect candidate behavior), so we do NOT pause here.
+  // Instead, we requestData() to encourage smaller blobs, and the uploader will slice large blobs into parts.
+  useEffect(() => {
+    const onVisibility = () => {
+      try {
+        const mr = screenRecorderRef.current
+        if (!mr) return
+        if (document.visibilityState === 'hidden') {
+          if (recordingRef.current && mr.state === 'recording') {
+            // Flush what we have so far as a smaller chunk.
+            try { mr.requestData() } catch (e) {}
+          }
+        }
+      } catch (e) {}
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => document.removeEventListener('visibilitychange', onVisibility)
+  }, [])
+
   useEffect(() => {
     return () => {
       if (mediaStream) mediaStream.getTracks().forEach(t => t.stop())
@@ -570,34 +591,53 @@ export default function Interview({ name, email, country, phone, interviewId, st
   }
 
   const uploadScreenChunk = async ({ mr, blob, index }) => {
+    const MAX_PART_BYTES = 512 * 1024 // 512KB
     const ext = (mr?.mimeType || '').includes('mp4') ? 'mp4' : 'webm'
-    // NOTE: FormData is recreated per attempt to avoid reusing a consumed body in some browsers.
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const fd = new FormData()
-      const filename = `${sessionIdRef.current || 'session'}-screen_pip-chunk-${Date.now()}.${ext}`
-      fd.append('video', blob, filename)
-      fd.append('metadata', JSON.stringify({
-        sessionId: sessionIdRef.current,
-        index,
-        interviewId,
-        name,
-        email,
-        country,
-        phone,
-        source: refSource,
-        questions: questionsRef.current,
-        kind: 'screen_pip',
-      }))
-      try {
-        const resp = await fetch(`${API_BASE}/upload-chunk`, { method: 'POST', body: fd })
-        try { await resp.json() } catch (e) {}
-        if (!resp.ok) throw new Error(`upload-chunk failed (${resp.status})`)
-        return
-      } catch (e) {
-        if (attempt === 2) throw e
-        await new Promise(r => setTimeout(r, 600 * (attempt + 1)))
+
+    const uploadOne = async ({ partBlob, part, partCount }) => {
+      // NOTE: FormData is recreated per attempt to avoid reusing a consumed body in some browsers.
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const fd = new FormData()
+        const filename = `${sessionIdRef.current || 'session'}-screen_pip-chunk-${Date.now()}.${ext}`
+        fd.append('video', partBlob, filename)
+        fd.append('metadata', JSON.stringify({
+          sessionId: sessionIdRef.current,
+          index,
+          part,
+          partCount,
+          interviewId,
+          name,
+          email,
+          country,
+          phone,
+          source: refSource,
+          questions: questionsRef.current,
+          kind: 'screen_pip',
+        }))
+        try {
+          const resp = await fetch(`${API_BASE}/upload-chunk`, { method: 'POST', body: fd })
+          try { await resp.json() } catch (e) {}
+          if (!resp.ok) throw new Error(`upload-chunk failed (${resp.status})`)
+          return
+        } catch (e) {
+          if (attempt === 2) throw e
+          await new Promise(r => setTimeout(r, 600 * (attempt + 1)))
+        }
       }
     }
+
+    // If the browser batches data (common when backgrounded), blob can be huge.
+    // Slice and upload sequentially as (index, part) so proxies never see a huge request.
+    if (blob && blob.size && blob.size > MAX_PART_BYTES) {
+      const partCount = Math.ceil(blob.size / MAX_PART_BYTES)
+      for (let part = 0; part < partCount; part++) {
+        const partBlob = blob.slice(part * MAX_PART_BYTES, Math.min(blob.size, (part + 1) * MAX_PART_BYTES))
+        await uploadOne({ partBlob, part, partCount })
+      }
+      return
+    }
+
+    await uploadOne({ partBlob: blob, part: 0, partCount: 1 })
   }
 
   const stopRecording = async () => {
