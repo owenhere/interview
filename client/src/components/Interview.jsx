@@ -806,7 +806,7 @@ export default function Interview({ name, email, country, phone, interviewId, st
                       <div className={`voice-status-pill ${speaking ? 'speaking' : 'silent'}`} title={`Mic level: ${(voiceLevel * 100).toFixed(1)}%`}>
                     <span className="voice-dot" />
                     <span className="voice-icon" style={{ transform: `scale(${iconScale})` }}>
-                      {speaking ? <SoundOutlined /> : <AudioMutedOutlined />}
+                      <SoundOutlined />
                     </span>
                     <span>{speaking ? 'Speaking' : 'Silent'}</span>
                     <span className="voice-meter" aria-hidden="true">
