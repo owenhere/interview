@@ -1156,14 +1156,37 @@ setInterval(() => {
         // check most recent mtime of group's files
         let latest = 0
         for (const fn of groups[sid]) {
-          const st = fs.statSync(path.join(CHUNK_DIR, fn))
-          const mtime = st.mtimeMs || st.mtime.getTime()
-          if (mtime > latest) latest = mtime
+          try {
+            const st = fs.statSync(path.join(CHUNK_DIR, fn))
+            const mtime = st.mtimeMs || st.mtime.getTime()
+            if (mtime > latest) latest = mtime
+          } catch (e) {
+            // File might not exist, skip it
+            continue
+          }
         }
         
-        // If chunks are very old (> 1 hour) and we've failed multiple times, delete them
+        // If no valid chunks found, skip
+        if (latest === 0) continue
+        
         const age = now - latest
         const failedInfo = failedAssemblyAttempts.get(sid)
+        
+        // If chunks are very old (> 24 hours), delete them immediately (likely corrupted/abandoned)
+        if (age > 86400_000) {
+          console.log('Background assembler: deleting very old chunks (>24h)', sid)
+          try {
+            for (const fn of groups[sid]) {
+              try { fs.unlinkSync(path.join(CHUNK_DIR, fn)) } catch (e) {}
+            }
+            failedAssemblyAttempts.delete(sid)
+          } catch (e) {
+            console.warn('Failed to delete old chunks for', sid, e.message || e)
+          }
+          continue
+        }
+        
+        // If chunks are old (> 1 hour) and we've failed multiple times, delete them
         if (age > 3600_000 && failedInfo && failedInfo.count >= 3) {
           console.log('Background assembler: deleting stale chunks after repeated failures', sid)
           try {
@@ -1171,7 +1194,9 @@ setInterval(() => {
               try { fs.unlinkSync(path.join(CHUNK_DIR, fn)) } catch (e) {}
             }
             failedAssemblyAttempts.delete(sid)
-          } catch (e) {}
+          } catch (e) {
+            console.warn('Failed to delete stale chunks for', sid, e.message || e)
+          }
           continue
         }
         
@@ -1179,12 +1204,20 @@ setInterval(() => {
         if (age > 30_000) {
           // Check if we've failed too many times (max 5 attempts)
           if (failedInfo && failedInfo.count >= 5) {
-            // Stop retrying after 5 failures
+            // Stop retrying after 5 failures - delete chunks to prevent infinite loop
+            console.log('Background assembler: stopping retries after 5 failures, deleting chunks', sid)
+            try {
+              for (const fn of groups[sid]) {
+                try { fs.unlinkSync(path.join(CHUNK_DIR, fn)) } catch (e) {}
+              }
+            } catch (e) {
+              console.warn('Failed to delete chunks after max retries for', sid, e.message || e)
+            }
             continue
           }
           
-          console.log('Background assembler: assembling stale session', sid)
-          ;(async () => {
+          console.log('Background assembler: assembling stale session', sid, `(age: ${Math.round(age / 1000)}s)`)
+          const assemblyPromise = (async () => {
             try {
               const s = await db.getSession(sid)
               const meta = s?.metadata || {}
@@ -1215,12 +1248,16 @@ setInterval(() => {
               }
             }
           })()
+          
+          // Ensure we always log the result
+          assemblyPromise
             .then(f => {
               console.log('Background assembled', sid, f && f.filename)
               failedAssemblyAttempts.delete(sid)
             })
             .catch(e => {
               if ((e && e.message) === 'no chunks found') {
+                console.log('Background assembler: no chunks found for', sid, '- cleaning up')
                 failedAssemblyAttempts.delete(sid)
                 return
               }
@@ -1232,8 +1269,9 @@ setInterval(() => {
               
               console.warn('Background assemble failed', sid, `(attempt ${failedInfo.count}/5)`, e.message || e)
               
-              // If we've failed 5 times, mark session as failed in DB
+              // If we've failed 5 times, mark session as failed in DB and delete chunks
               if (failedInfo.count >= 5) {
+                console.warn('Background assembler: max retries reached for', sid, '- marking as failed and cleaning up')
                 ;(async () => {
                   try {
                     await db.upsertSession({
@@ -1245,8 +1283,12 @@ setInterval(() => {
                         assemblyFailureReason: String(e.message || e).slice(0, 500),
                       },
                     })
+                    // Delete chunks after marking as failed
+                    for (const fn of groups[sid] || []) {
+                      try { fs.unlinkSync(path.join(CHUNK_DIR, fn)) } catch (delErr) {}
+                    }
                   } catch (dbErr) {
-                    // ignore DB errors
+                    console.warn('Failed to mark session as failed in DB for', sid, dbErr.message || dbErr)
                   }
                 })()
               }
@@ -1578,6 +1620,77 @@ app.use((err, req, res, next) => {
 
 async function startServer() {
   await db.initDb()
+
+  // Cleanup stale chunks on startup (prevents infinite retry loops from old chunks)
+  try {
+    const files = fs.readdirSync(CHUNK_DIR)
+    const now = Date.now()
+    let cleanedCount = 0
+    const groups = {}
+    
+    // Group chunks by session
+    for (const f of files) {
+      const m = f.match(/^(.*?)-chunk-/)
+      if (!m) continue
+      const sid = m[1]
+      groups[sid] = groups[sid] || []
+      groups[sid].push(f)
+    }
+    
+    // Clean up chunks older than 24 hours or from finalized sessions
+    for (const [sid, chunkFiles] of Object.entries(groups)) {
+      let shouldClean = false
+      let reason = ''
+      
+      // Check if session is finalized
+      try {
+        const session = await db.getSession(sid)
+        if (session && session.metadata && session.metadata.finalizedAt) {
+          shouldClean = true
+          reason = 'session finalized'
+        }
+      } catch (e) {
+        // DB error - check file age instead
+      }
+      
+      // Check chunk age
+      if (!shouldClean) {
+        let latest = 0
+        for (const fn of chunkFiles) {
+          try {
+            const st = fs.statSync(path.join(CHUNK_DIR, fn))
+            const mtime = st.mtimeMs || st.mtime.getTime()
+            if (mtime > latest) latest = mtime
+          } catch (e) {}
+        }
+        const age = now - latest
+        if (age > 86400_000) { // 24 hours
+          shouldClean = true
+          reason = `chunks older than 24h (${Math.round(age / 3600000)}h)`
+        }
+      }
+      
+      if (shouldClean) {
+        let sessionCleaned = 0
+        for (const fn of chunkFiles) {
+          try {
+            fs.unlinkSync(path.join(CHUNK_DIR, fn))
+            cleanedCount++
+            sessionCleaned++
+          } catch (e) {}
+        }
+        if (sessionCleaned > 0) {
+          console.log(`Startup cleanup: removed ${sessionCleaned} chunk(s) for ${sid} (${reason})`)
+        }
+      }
+    }
+    
+    if (cleanedCount > 0) {
+      console.log(`Startup cleanup: removed ${cleanedCount} total stale chunk file(s)`)
+    }
+  } catch (e) {
+    console.warn('Startup chunk cleanup failed (continuing):', e?.message || e)
+  }
 
   // Auto-migrate records.json -> Postgres ONCE (only when DB is empty)
   try {
