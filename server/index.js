@@ -1115,6 +1115,9 @@ app.post(withBackendPrefix('/upload-complete-beacon'), express.json(), async (re
   return res.status(202).json({ ok: true, message: 'Assemble triggered' })
 })
 
+// Track failed assembly attempts to prevent infinite retries
+const failedAssemblyAttempts = new Map() // sessionId -> { count, firstAttempt }
+
 // Background scanner: assemble stale chunk groups after a short inactivity window
 setInterval(() => {
   ;(async () => {
@@ -1135,7 +1138,16 @@ setInterval(() => {
           const session = await db.getSession(sid)
           if (session && session.metadata) {
             if (session.metadata.recordingActive === true) continue
-            if (session.metadata.finalizedAt) continue
+            if (session.metadata.finalizedAt) {
+              // Session already finalized, clean up any leftover chunks
+              try {
+                for (const fn of groups[sid]) {
+                  try { fs.unlinkSync(path.join(CHUNK_DIR, fn)) } catch (e) {}
+                }
+                failedAssemblyAttempts.delete(sid)
+              } catch (e) {}
+              continue
+            }
           }
         } catch (e) {
           // ignore DB errors and proceed with mtime-based decision
@@ -1148,14 +1160,35 @@ setInterval(() => {
           const mtime = st.mtimeMs || st.mtime.getTime()
           if (mtime > latest) latest = mtime
         }
+        
+        // If chunks are very old (> 1 hour) and we've failed multiple times, delete them
+        const age = now - latest
+        const failedInfo = failedAssemblyAttempts.get(sid)
+        if (age > 3600_000 && failedInfo && failedInfo.count >= 3) {
+          console.log('Background assembler: deleting stale chunks after repeated failures', sid)
+          try {
+            for (const fn of groups[sid]) {
+              try { fs.unlinkSync(path.join(CHUNK_DIR, fn)) } catch (e) {}
+            }
+            failedAssemblyAttempts.delete(sid)
+          } catch (e) {}
+          continue
+        }
+        
         // if no chunk activity for 30 seconds, attempt assembly
-        if (now - latest > 30_000) {
+        if (age > 30_000) {
+          // Check if we've failed too many times (max 5 attempts)
+          if (failedInfo && failedInfo.count >= 5) {
+            // Stop retrying after 5 failures
+            continue
+          }
+          
           console.log('Background assembler: assembling stale session', sid)
           ;(async () => {
             try {
               const s = await db.getSession(sid)
               const meta = s?.metadata || {}
-              return assembleChunks(
+              const result = await assembleChunks(
                 sid,
                 s?.name || 'Unknown',
                 meta.interviewId,
@@ -1168,14 +1201,55 @@ setInterval(() => {
                   kind: meta.kind,
                 }
               )
+              // Success - clear failure tracking
+              failedAssemblyAttempts.delete(sid)
+              return result
             } catch (e) {
-              return assembleChunks(sid)
+              // If DB lookup fails, try with minimal info
+              try {
+                const result = await assembleChunks(sid)
+                failedAssemblyAttempts.delete(sid)
+                return result
+              } catch (e2) {
+                throw e2
+              }
             }
           })()
-            .then(f => console.log('Background assembled', sid, f && f.filename))
+            .then(f => {
+              console.log('Background assembled', sid, f && f.filename)
+              failedAssemblyAttempts.delete(sid)
+            })
             .catch(e => {
-              if ((e && e.message) === 'no chunks found') return
-              console.warn('Background assemble failed', sid, e.message || e)
+              if ((e && e.message) === 'no chunks found') {
+                failedAssemblyAttempts.delete(sid)
+                return
+              }
+              // Track failure
+              const failedInfo = failedAssemblyAttempts.get(sid) || { count: 0, firstAttempt: now }
+              failedInfo.count += 1
+              if (!failedInfo.firstAttempt) failedInfo.firstAttempt = now
+              failedAssemblyAttempts.set(sid, failedInfo)
+              
+              console.warn('Background assemble failed', sid, `(attempt ${failedInfo.count}/5)`, e.message || e)
+              
+              // If we've failed 5 times, mark session as failed in DB
+              if (failedInfo.count >= 5) {
+                ;(async () => {
+                  try {
+                    await db.upsertSession({
+                      id: sid,
+                      sessionId: sid,
+                      metadataPatch: {
+                        assemblyFailed: true,
+                        assemblyFailedAt: new Date().toISOString(),
+                        assemblyFailureReason: String(e.message || e).slice(0, 500),
+                      },
+                    })
+                  } catch (dbErr) {
+                    // ignore DB errors
+                  }
+                })()
+              }
             })
         }
       }
