@@ -615,12 +615,21 @@ export default function Interview({ name, email, country, phone, interviewId, st
           kind: 'screen_pip',
         }))
         try {
-          const resp = await fetch(`${API_BASE}/upload-chunk`, { method: 'POST', body: fd })
-          try { await resp.json() } catch (e) {}
-          if (!resp.ok) throw new Error(`upload-chunk failed (${resp.status})`)
-          return
+          // Add 60-second timeout to prevent indefinite hanging on poor networks
+          const controller = new AbortController()
+          const timeoutId = setTimeout(() => controller.abort(), 60000)
+          try {
+            const resp = await fetch(`${API_BASE}/upload-chunk`, { method: 'POST', body: fd, signal: controller.signal })
+            clearTimeout(timeoutId)
+            try { await resp.json() } catch (e) {}
+            if (!resp.ok) throw new Error(`upload-chunk failed (${resp.status})`)
+            return
+          } finally {
+            clearTimeout(timeoutId)
+          }
         } catch (e) {
-          if (attempt === 2) throw e
+          const isTimeout = e?.name === 'AbortError'
+          if (attempt === 2) throw new Error(isTimeout ? 'Upload timeout (network too slow)' : e?.message || String(e))
           await new Promise(r => setTimeout(r, 600 * (attempt + 1)))
         }
       }

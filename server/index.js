@@ -925,8 +925,9 @@ async function assembleChunks(sessionId, name, interviewId, candidate) {
 
   const chunkPaths = files.map(f => path.join(CHUNK_DIR, f))
 
-  // Prefer producing MP4 for maximum compatibility, if ffmpeg is available.
-  // If ffmpeg isn't available (or fails), fall back to byte concatenation (best effort).
+  // Produce MP4 for maximum compatibility using ffmpeg.
+  // IMPORTANT: ffmpeg is REQUIRED for production. Naive byte concatenation creates corrupt WebM files
+  // because WebM uses Matroska/EBML container with headers that cannot be simply concatenated.
   let outName = `${Date.now()}-${sessionId}.mp4`
   let outPath = path.join(UPLOAD_DIR, outName)
   let assembledViaFfmpeg = false
@@ -936,22 +937,11 @@ async function assembleChunks(sessionId, name, interviewId, candidate) {
       await tryAssembleToMp4WithFfmpeg({ chunkPaths, outPathMp4: outPath })
       assembledViaFfmpeg = true
     } catch (e) {
-      // If ffmpeg is missing or concat fails, we'll fall back to naive concat.
-      console.warn('ffmpeg chunk assembly failed; falling back to naive concat', e?.message || e)
-      assembledViaFfmpeg = false
+      console.error('ffmpeg chunk assembly failed', e?.message || e)
+      throw new Error(`Video assembly failed: ${e?.message || 'ffmpeg error'}. Ensure ffmpeg is installed on the server.`)
     }
-  }
-
-  if (!assembledViaFfmpeg) {
-    outName = `${Date.now()}-${sessionId}.webm`
-    outPath = path.join(UPLOAD_DIR, outName)
-    const ws = fs.createWriteStream(outPath)
-    for (const p of chunkPaths) {
-      const buf = fs.readFileSync(p)
-      ws.write(buf)
-    }
-    ws.end()
-    await new Promise((resolve, reject) => { ws.on('finish', resolve); ws.on('error', reject) })
+  } else {
+    throw new Error('ffmpeg is required for video assembly but is not available. Please install ffmpeg on your server.')
   }
   // Guard against creating empty output files (which can trigger 416 range errors and bad playback).
   try {

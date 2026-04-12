@@ -7,11 +7,18 @@ Overview
 - Backend: Node + Express (`/server`) — generates questions using OpenAI and accepts video uploads.
 
 Setup
-1. Configure the backend environment (PostgreSQL + OpenAI):
+1. **Install ffmpeg** (required for video assembly):
+   - Ubuntu/Debian: `sudo apt update && sudo apt install ffmpeg`
+   - macOS: `brew install ffmpeg`
+   - Windows: Download from https://ffmpeg.org/download.html
+   - Verify: `ffmpeg -version`
+
+2. Configure the backend environment (PostgreSQL + OpenAI):
    - Copy `server/env.example` to `server/.env`
    - Set `DATABASE_URL` (PostgreSQL connection string)
    - Set `OPENAI_API_KEY` (for question generation + evaluation)
-2. From the repo root, install dependencies for each package:
+
+3. From the repo root, install dependencies for each package:
 
 ```powershell
 cd server; npm install
@@ -33,10 +40,11 @@ Endpoints
 
 Notes
 - This is a minimal starter. Improve UI, security, error handling, and storage as needed.
-- Video format:
-  - Many browsers (notably Chrome) record via `MediaRecorder` as **WebM**, not MP4.
-  - To ensure finalized recordings are **MP4**, the backend will use **ffmpeg** (if available) to assemble/transcode chunk uploads into `.mp4`.
-  - Install ffmpeg on your deployed server, or set `ENABLE_FFMPEG=false` to disable this behavior.
+- **Video format:**
+  - Browsers record via `MediaRecorder` as **WebM** (Chrome/Firefox) or MP4 (Safari).
+  - The backend **requires ffmpeg** to assemble chunked uploads into valid `.mp4` files.
+  - **IMPORTANT:** ffmpeg is mandatory for production. Simple byte concatenation creates corrupt WebM files due to container format limitations.
+  - Verify ffmpeg is available: `ffmpeg -version`
 - Upload limits / 413 errors:
   - If you see `413 Request Entity Too Large` on `POST /backend/upload-chunk`, it's **not** a slow-internet error — it means your **reverse proxy** (nginx/traefik) or Node upload limits are too small.
   - Node/multer limit can be controlled via `MAX_UPLOAD_MB` (defaults to 100MB).
