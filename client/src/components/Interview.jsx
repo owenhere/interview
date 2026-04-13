@@ -502,25 +502,64 @@ export default function Interview({ name, email, linkedinUrl, country, phone, in
     autoStopTriggeredRef.current = false
     stopReasonRef.current = null
     setThankYouOpen(false)
+    
+    // Strategy: Check if camera permission already exists to avoid user gesture timeout.
+    // If camera is already accessible, get it first. Otherwise, get screen share first
+    // to preserve the user gesture for the permission prompt.
     let stream = mediaRef.current?.srcObject || mediaStream
-    if (!stream) stream = await startCamera()
-    if (!stream) {
-      // Most commonly: user denied permissions or browser blocked prompt.
-      if (!blocked) setUploadError('Please allow camera & microphone access, then try again.')
-      setRecording(false)
-      return
-    }
-
-    // Screen share is REQUIRED (and must be "Entire Screen" best-effort).
     let display = null
-    try {
-      setUploadError('')
-      display = await startDisplayStreamRequireMonitor()
-    } catch (e) {
-      if (!blocked) setUploadError(e?.message || 'Screen sharing is required to start the interview.')
+    
+    // Quick check: do we already have camera stream?
+    const hasExistingStream = !!(stream && stream.active && stream.getVideoTracks().length > 0)
+    
+    if (hasExistingStream) {
+      // Camera already available - proceed with original order
+      // Screen share can come after since camera was instant
+      try {
+        setUploadError('')
+        display = await startDisplayStreamRequireMonitor()
+      } catch (e) {
+        if (!blocked) setUploadError(e?.message || 'Screen sharing is required to start the interview.')
+        setRecording(false)
+        return
+      }
+    } else {
+      // No existing camera stream - use robust parallel approach
+      // This handles both first-time users and users who previously granted permission
+      try {
+        // Create a "fast track" promise that resolves as soon as screen permission is requested
+        // This ensures screen share happens within the user gesture window
+        const screenPromise = startDisplayStreamRequireMonitor()
+        
+        // Start camera request in parallel (it will queue after screen if needed)
+        const cameraPromise = startCamera()
+        
+        // Wait for screen share first (critical for user gesture), then camera
+        display = await screenPromise
+        stream = await cameraPromise
+        
+        if (!stream) {
+          // Camera failed - clean up screen share and abort
+          try { if (display) display.getTracks().forEach(t => t.stop()) } catch (err) {}
+          if (!blocked) setUploadError('Please allow camera & microphone access, then try again.')
+          setRecording(false)
+          return
+        }
+      } catch (e) {
+        if (!blocked) setUploadError(e?.message || 'Screen sharing is required to start the interview.')
+        setRecording(false)
+        return
+      }
+    }
+    
+    // Ensure we have both streams
+    if (!stream || !display) {
+      try { if (display) display.getTracks().forEach(t => t.stop()) } catch (e) {}
+      if (!blocked) setUploadError('Both camera and screen sharing are required.')
       setRecording(false)
       return
     }
+    
     // best-effort voice detection (does not block recording)
     if (stream) startVoiceDetection(stream)
 
