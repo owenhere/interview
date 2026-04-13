@@ -148,6 +148,29 @@ export default function Interview({ name, email, linkedinUrl, country, phone, in
   useEffect(() => { completedRef.current = !!thankYouOpen }, [thankYouOpen])
   useEffect(() => { questionsRef.current = Array.isArray(questions) ? questions : [] }, [questions])
 
+  // Warn if tab becomes hidden during recording
+  useEffect(() => {
+    if (!recording) return
+    
+    const handleVisibilityChange = () => {
+      if (document.hidden && recordingRef.current) {
+        console.warn('⚠️ Tab is now hidden. Keep this tab visible for best recording quality.')
+        // Show a brief warning (doesn't stop recording, just informs)
+        if (!uploadError) {
+          setUploadError('⚠️ Keep this tab visible during recording for best quality')
+          setTimeout(() => {
+            if (!document.hidden) setUploadError('')
+          }, 3000)
+        }
+      } else if (!document.hidden && recordingRef.current) {
+        setUploadError('')
+      }
+    }
+    
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange)
+  }, [recording, uploadError])
+
   useEffect(() => {
     if (!recording) return
     if (elapsedSeconds < MAX_DURATION_SECONDS) return
@@ -445,7 +468,15 @@ export default function Interview({ name, email, linkedinUrl, country, phone, in
       } catch (e) {}
       pipRafRef.current = requestAnimationFrame(draw)
     }
+    
+    // Use both requestAnimationFrame and setInterval for redundancy
+    // requestAnimationFrame is throttled when tab is backgrounded, but setInterval continues
     pipRafRef.current = requestAnimationFrame(draw)
+    const intervalId = setInterval(draw, 50) // ~20 FPS backup when RAF is throttled
+    
+    // Store interval ID for cleanup
+    if (!window.__interviewDrawInterval) window.__interviewDrawInterval = []
+    window.__interviewDrawInterval.push(intervalId)
 
     // Lower FPS reduces bitrate and chunk sizes.
     const outStream = canvas.captureStream(20)
@@ -730,6 +761,13 @@ export default function Interview({ name, email, linkedinUrl, country, phone, in
     screenStreamRef.current = null
     try { if (pipRafRef.current) cancelAnimationFrame(pipRafRef.current) } catch (e) {}
     pipRafRef.current = null
+    // Clear all drawing intervals
+    try {
+      if (window.__interviewDrawInterval) {
+        window.__interviewDrawInterval.forEach(id => clearInterval(id))
+        window.__interviewDrawInterval = []
+      }
+    } catch (e) {}
     setUploading(false)
     try { localStorage.setItem('interview_locked', 'true') } catch (e) {}
   }
@@ -853,14 +891,28 @@ export default function Interview({ name, email, linkedinUrl, country, phone, in
                   microphone are working properly, then click the button below when you are ready.
                 </p>
               ) : (
-                <p className="session-question-text">
-                  {questions[index]}
-                </p>
+                <>
+                  <p className="session-question-text">
+                    {questions[index]}
+                  </p>
+                  <div style={{ 
+                    marginTop: '12px',
+                    padding: '8px 12px', 
+                    background: 'rgba(59, 130, 246, 0.1)', 
+                    border: '1px solid rgba(59, 130, 246, 0.3)',
+                    borderRadius: '6px',
+                    fontSize: '12px',
+                    color: '#1e40af'
+                  }}>
+                    💡 <strong>Keep this tab visible</strong> during recording for best quality
+                  </div>
+                </>
               )}
 
               {!recording ? (
                 <div className="muted" style={{ marginTop: 10, fontSize: 12 }}>
-                  Screen sharing is required. When prompted, choose <strong>Entire Screen</strong> (not a tab or app window).
+                  <strong>⚠️ Important:</strong> When prompted, select <strong>"Entire Screen"</strong> or <strong>"Your Screen"</strong><br/>
+                  Do NOT select "Chrome Tab" or "Window" - this will not capture your full screen correctly.
                 </div>
               ) : null}
 
