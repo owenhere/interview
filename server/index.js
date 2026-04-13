@@ -546,7 +546,6 @@ async function tryAssembleToMp4WithFfmpeg({ chunkPaths, outPathMp4 }) {
       try { fs.unlinkSync(listPath) } catch (e) {}
     }
   }
-  }
 }
 
 async function generateThumbnail({ inputPath, thumbAbsPath }) {
