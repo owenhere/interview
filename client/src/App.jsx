@@ -12,6 +12,7 @@ export default function App() {
   const [routePath, setRoutePath] = useState(() => (typeof window !== 'undefined' ? window.location.pathname : '/'))
   const [name, setName] = useState('')
   const [email, setEmail] = useState('')
+  const [linkedinUrl, setLinkedinUrl] = useState('')
   const [country, setCountry] = useState('')
   const [phone, setPhone] = useState('')
   const [countryOther, setCountryOther] = useState('')
@@ -76,6 +77,9 @@ export default function App() {
     }
     if (!isValidEmail(email)) {
       return window.alert('Please enter a valid email address')
+    }
+    if (!linkedinUrl.trim()) {
+      return window.alert('Please enter your LinkedIn URL')
     }
     if (!country.trim()) {
       return window.alert('Please enter your country')
@@ -161,6 +165,7 @@ export default function App() {
       if (!data || typeof data !== 'object') return
       if (typeof data.name === 'string' && !name) setName(data.name)
       if (typeof data.email === 'string' && !email) setEmail(data.email)
+      if (typeof data.linkedinUrl === 'string' && !linkedinUrl) setLinkedinUrl(data.linkedinUrl)
       if (typeof data.country === 'string' && !country) setCountry(data.country)
       if (typeof data.countryOther === 'string' && !countryOther) setCountryOther(data.countryOther)
       if (typeof data.phone === 'string' && !phone) setPhone(data.phone)
@@ -183,6 +188,7 @@ export default function App() {
       const hasAny =
         !!String(name || '').trim() ||
         !!String(email || '').trim() ||
+        !!String(linkedinUrl || '').trim() ||
         !!String(country || '').trim() ||
         !!String(countryOther || '').trim() ||
         !!String(phone || '').trim() ||
@@ -192,6 +198,7 @@ export default function App() {
       const payload = {
         name,
         email,
+        linkedinUrl,
         country,
         countryOther,
         phone,
@@ -203,7 +210,7 @@ export default function App() {
     } catch (e) {
       // ignore storage errors
     }
-  }, [candidateInfoHydrated, candidateInfoKey, name, email, country, countryOther, phone, refSource, refSourceOther])
+  }, [candidateInfoHydrated, candidateInfoKey, name, email, linkedinUrl, country, countryOther, phone, refSource, refSourceOther])
 
   useEffect(() => {
     let cancelled = false
@@ -230,7 +237,7 @@ export default function App() {
   if (isRunPage) {
     const source = (refSource === 'Other') ? `Other: ${String(refSourceOther || '').trim()}` : refSource
     const finalCountry = (country === 'Other') ? String(countryOther || '').trim() : country
-    const hasRequired = !!(String(name || '').trim() && String(email || '').trim() && String(finalCountry || '').trim() && String(refSource || '').trim() && isValidEmail(email))
+    const hasRequired = !!(String(name || '').trim() && String(email || '').trim() && String(linkedinUrl || '').trim() && String(finalCountry || '').trim() && String(refSource || '').trim() && isValidEmail(email))
     if (!hasRequired) {
       return (
         <div className="app">
@@ -250,7 +257,7 @@ export default function App() {
         </div>
       )
     }
-    return <Interview name={name} email={email} country={finalCountry} phone={phone} interviewId={interviewId} stack={interview?.stack} refSource={source} />
+    return <Interview name={name} email={email} linkedinUrl={linkedinUrl} country={finalCountry} phone={phone} interviewId={interviewId} stack={interview?.stack} refSource={source} />
   }
 
   return (
@@ -293,6 +300,19 @@ export default function App() {
               placeholder="Enter your email address"
               value={email}
               onChange={e => setEmail(e.target.value)}
+            />
+          </div>
+
+          <div className="form-field">
+            <div className="field-label">
+              LinkedIn URL <span className="field-required">*</span>
+            </div>
+            <Input
+              size="large"
+              type="url"
+              placeholder="https://linkedin.com/in/your-profile"
+              value={linkedinUrl}
+              onChange={e => setLinkedinUrl(e.target.value)}
             />
           </div>
 

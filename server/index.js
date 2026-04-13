@@ -981,6 +981,7 @@ async function assembleChunks(sessionId, name, interviewId, candidate) {
     lastUploadedAt: fileEntry.uploadedAt,
     metadataPatch: {
       email: candidate?.email ? String(candidate.email).trim() : undefined,
+      linkedinUrl: candidate?.linkedinUrl ? String(candidate.linkedinUrl).trim() : undefined,
       country: candidate?.country ? String(candidate.country).trim() : undefined,
       phone: candidate?.phone ? String(candidate.phone).trim() : undefined,
       source: candidate?.source ? String(candidate.source).trim() : undefined,
@@ -1025,7 +1026,7 @@ async function assembleChunks(sessionId, name, interviewId, candidate) {
 
 // POST /upload-complete (explicit finalization)
 app.post(withBackendPrefix('/upload-complete'), express.json(), async (req, res) => {
-  const { sessionId, name, interviewId, email, country, phone, source, questions, kind, force } = req.body || {}
+  const { sessionId, name, interviewId, email, linkedinUrl, country, phone, source, questions, kind, force } = req.body || {}
   if (!sessionId) return res.status(400).json({ error: 'sessionId required' })
 
   // Guard: don't assemble while the candidate is still recording.
@@ -1039,7 +1040,7 @@ app.post(withBackendPrefix('/upload-complete'), express.json(), async (req, res)
   } catch (e) {}
 
   try {
-    const fileEntry = await assembleChunks(sessionId, name, interviewId, { email, country, phone, source, questions, kind })
+    const fileEntry = await assembleChunks(sessionId, name, interviewId, { email, linkedinUrl, country, phone, source, questions, kind })
     return res.json({ ok: true, sessionId, file: fileEntry })
   } catch (err) {
     console.error('upload-complete failed', err.message || err)
@@ -1053,6 +1054,7 @@ app.get(withBackendPrefix('/upload-complete-beacon'), (req, res) => {
   const name = req.query.name
   const interviewId = req.query.interviewId
   const email = req.query.email
+  const linkedinUrl = req.query.linkedinUrl
   const country = req.query.country
   const phone = req.query.phone
   const source = req.query.source
@@ -1066,7 +1068,7 @@ app.get(withBackendPrefix('/upload-complete-beacon'), (req, res) => {
       if (!force && session?.metadata?.recordingActive === true) return
     } catch (e) {}
 
-    return assembleChunks(sessionId, name, interviewId, { email, country, phone, source })
+    return assembleChunks(sessionId, name, interviewId, { email, linkedinUrl, country, phone, source })
   })().then(file => {
     console.log('Beacon assembled session', sessionId, '->', file.filename)
   }).catch(err => {
@@ -1082,7 +1084,7 @@ app.get(withBackendPrefix('/upload-complete-beacon'), (req, res) => {
 
 // Accept POST beacons too (navigator.sendBeacon will POST a small payload)
 app.post(withBackendPrefix('/upload-complete-beacon'), express.json(), async (req, res) => {
-  const { sessionId, name, interviewId, email, country, phone, source, force, questions, kind } = req.body || {}
+  const { sessionId, name, interviewId, email, linkedinUrl, country, phone, source, force, questions, kind } = req.body || {}
   if (!sessionId) return res.status(400).json({ error: 'sessionId required' })
 
   // Guard: don't assemble while recording is active. Just accept the beacon and no-op.
@@ -1093,7 +1095,7 @@ app.post(withBackendPrefix('/upload-complete-beacon'), express.json(), async (re
     }
   } catch (e) {}
 
-  assembleChunks(sessionId, name, interviewId, { email, country, phone, source, questions, kind }).then(file => {
+  assembleChunks(sessionId, name, interviewId, { email, linkedinUrl, country, phone, source, questions, kind }).then(file => {
     console.log('Beacon (POST) assembled session', sessionId, '->', file.filename)
   }).catch(err => {
     if ((err && err.message) === 'no chunks found') {

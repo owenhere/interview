@@ -45,7 +45,7 @@ function downloadBlob(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 10_000)
 }
 
-export default function Interview({ name, email, country, phone, interviewId, stack, refSource }) {
+export default function Interview({ name, email, linkedinUrl, country, phone, interviewId, stack, refSource }) {
   const [questions, setQuestions] = useState([])
   const [index, setIndex] = useState(0)
   const [loading, setLoading] = useState(false)
@@ -176,7 +176,7 @@ export default function Interview({ name, email, country, phone, interviewId, st
         if (completedRef.current) return
         if (recorderRef.current && recorderRef.current.state !== 'inactive') return
         const url = `${API_BASE}/upload-complete-beacon`
-        const payload = JSON.stringify({ sessionId: sessionIdRef.current, name, email, country, phone, interviewId, source: refSource, questions: questionsRef.current, kind: 'screen_pip' })
+        const payload = JSON.stringify({ sessionId: sessionIdRef.current, name, email, linkedinUrl, country, phone, interviewId, source: refSource, questions: questionsRef.current, kind: 'screen_pip' })
         if (navigator.sendBeacon) {
           const blob = new Blob([payload], { type: 'application/json' })
           navigator.sendBeacon(url, blob)
@@ -199,7 +199,7 @@ export default function Interview({ name, email, country, phone, interviewId, st
         // On unload we want best-effort finalization of chunks already uploaded.
         // Use `force:true` so the server assembles even if recordingActive is still true.
         const url = `${API_BASE}/upload-complete-beacon`
-        const payload = JSON.stringify({ sessionId: sessionIdRef.current, name, email, country, phone, interviewId, source: refSource, force: true, questions: questionsRef.current, kind: 'screen_pip' })
+        const payload = JSON.stringify({ sessionId: sessionIdRef.current, name, email, linkedinUrl, country, phone, interviewId, source: refSource, force: true, questions: questionsRef.current, kind: 'screen_pip' })
         if (navigator.sendBeacon) {
           const blob = new Blob([payload], { type: 'application/json' })
           navigator.sendBeacon(url, blob)
@@ -698,6 +698,7 @@ export default function Interview({ name, email, country, phone, interviewId, st
         sessionId: sessionIdRef.current,
         name,
         email,
+        linkedinUrl,
         country,
         phone,
         interviewId,
