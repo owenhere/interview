@@ -492,51 +492,60 @@ async function tryAssembleToMp4WithFfmpeg({ chunkPaths, outPathMp4 }) {
     await runFfmpeg([
       '-y',
       '-i', chunkPaths[0],
-      '-map', '0:v:0',
-      '-map', '0:a?',
-      '-c:v', 'libx264',
-      '-preset', 'veryfast',
-      '-crf', '28',
-      '-pix_fmt', 'yuv420p',
-      '-c:a', 'aac',
-      '-b:a', '96k',
+      '-c', 'copy',
       '-movflags', '+faststart',
       outPathMp4,
     ])
     return { ok: true }
   }
 
-  // Use ffmpeg concat demuxer for proper media concatenation.
-  // Works when the chunk files are valid media segments.
-  const listPath = path.join(path.dirname(outPathMp4), `ffconcat-${Date.now()}.txt`)
+  // Use concat protocol for fragmented MP4 chunks (from MediaRecorder).
+  // This works better than concat demuxer for incomplete fragments.
+  // We use codec copy (no re-encoding) for speed and quality.
+  const concatInput = chunkPaths.map(p => `concat:${p}`).join('|')
+  
   try {
-    const contents = chunkPaths
-      .map(p => `file '${String(p).replace(/'/g, "'\\''")}'`)
-      .join('\n')
-    fs.writeFileSync(listPath, contents)
-
-    // Re-encode to H.264/AAC MP4 for maximum compatibility.
-    // -map 0:a? makes audio optional (won't fail if no audio track).
     await runFfmpeg([
       '-y',
-      '-f', 'concat',
-      '-safe', '0',
-      '-i', listPath,
-      '-map', '0:v:0',
-      '-map', '0:a?',
-      '-c:v', 'libx264',
-      '-preset', 'veryfast',
-      '-crf', '28',
-      '-pix_fmt', 'yuv420p',
-      '-c:a', 'aac',
-      '-b:a', '96k',
+      '-i', concatInput,
+      '-c', 'copy',
       '-movflags', '+faststart',
       outPathMp4,
     ])
-
     return { ok: true }
-  } finally {
-    try { fs.unlinkSync(listPath) } catch (e) {}
+  } catch (firstErr) {
+    // Fallback: if concat protocol fails, try re-encoding individual chunks
+    console.warn('concat protocol failed, trying re-encode fallback')
+    
+    const listPath = path.join(path.dirname(outPathMp4), `ffconcat-${Date.now()}.txt`)
+    try {
+      const contents = chunkPaths
+        .map(p => `file '${String(p).replace(/'/g, "'\\''")}'`)
+        .join('\n')
+      fs.writeFileSync(listPath, contents)
+
+      await runFfmpeg([
+        '-y',
+        '-f', 'concat',
+        '-safe', '0',
+        '-analyzeduration', '100M',
+        '-probesize', '100M',
+        '-i', listPath,
+        '-c:v', 'libx264',
+        '-preset', 'veryfast',
+        '-crf', '28',
+        '-pix_fmt', 'yuv420p',
+        '-c:a', 'aac',
+        '-b:a', '96k',
+        '-movflags', '+faststart',
+        outPathMp4,
+      ])
+
+      return { ok: true }
+    } finally {
+      try { fs.unlinkSync(listPath) } catch (e) {}
+    }
+  }
   }
 }
 
