@@ -487,6 +487,25 @@ function runFfmpeg(args, { cwd } = {}) {
 }
 
 async function tryAssembleToMp4WithFfmpeg({ chunkPaths, outPathMp4 }) {
+  // Special case: if only one chunk, just convert it directly
+  if (chunkPaths.length === 1) {
+    await runFfmpeg([
+      '-y',
+      '-i', chunkPaths[0],
+      '-map', '0:v:0',
+      '-map', '0:a?',
+      '-c:v', 'libx264',
+      '-preset', 'veryfast',
+      '-crf', '28',
+      '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac',
+      '-b:a', '96k',
+      '-movflags', '+faststart',
+      outPathMp4,
+    ])
+    return { ok: true }
+  }
+
   // Use ffmpeg concat demuxer for proper media concatenation.
   // Works when the chunk files are valid media segments.
   const listPath = path.join(path.dirname(outPathMp4), `ffconcat-${Date.now()}.txt`)
@@ -938,6 +957,9 @@ async function assembleChunks(sessionId, name, interviewId, candidate) {
       assembledViaFfmpeg = true
     } catch (e) {
       console.error('ffmpeg chunk assembly failed', e?.message || e)
+      if (e?.stderr) {
+        console.error('ffmpeg stderr:', e.stderr)
+      }
       throw new Error(`Video assembly failed: ${e?.message || 'ffmpeg error'}. Ensure ffmpeg is installed on the server.`)
     }
   } else {
