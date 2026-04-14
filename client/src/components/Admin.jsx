@@ -651,6 +651,7 @@ export default function Admin() {
 
             <div style={{ fontWeight: 700, marginBottom: 6 }}>Candidate info</div>
             <div className="muted" style={{ marginBottom: 4 }}>Email: <strong>{selected.metadata?.email || '—'}</strong></div>
+            <div className="muted" style={{ marginBottom: 4 }}>LinkedIn: <strong>{selected.metadata?.linkedinUrl ? <a href={selected.metadata.linkedinUrl} target="_blank" rel="noopener noreferrer">{selected.metadata.linkedinUrl}</a> : '—'}</strong></div>
             <div className="muted" style={{ marginBottom: 4 }}>Country: <strong>{selected.metadata?.country || '—'}</strong></div>
             <div className="muted" style={{ marginBottom: 4 }}>Phone: <strong>{selected.metadata?.phone || '—'}</strong></div>
             <div className="muted" style={{ marginBottom: 4 }}>Source: <strong>{selected.metadata?.source || '—'}</strong></div>
